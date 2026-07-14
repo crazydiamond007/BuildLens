@@ -1,0 +1,87 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+.cargo/credentials
+.cargo/credentials.toml
+
+# Local agent and workspace state
+.agents/
+.codex/
+
+# Rust
+**/target/
+
+# Java, Gradle, and Maven
+/analytics/build/
+/analytics/.gradle/
+/analytics/out/
+/analytics/.classpath
+/analytics/.project
+/analytics/.settings/
+*.iml
+hs_err_pid*
+replay_pid*
+
+# Python
+/ai-worker/.venv/
+/ai-worker/venv/
+/ai-worker/env/
+/ai-worker/__pycache__/
+/ai-worker/.pytest_cache/
+/ai-worker/.mypy_cache/
+/ai-worker/.ruff_cache/
+/ai-worker/.hypothesis/
+/ai-worker/.coverage
+/ai-worker/.coverage.*
+/ai-worker/htmlcov/
+/ai-worker/build/
+/ai-worker/dist/
+/ai-worker/*.egg-info/
+**/__pycache__/
+**/*.py[cod]
+
+# Node and Next.js
+/frontend/node_modules/
+/frontend/.next/
+/frontend/.turbo/
+/frontend/.vercel/
+/frontend/.parcel-cache/
+/frontend/out/
+/frontend/dist/
+/frontend/coverage/
+/frontend/.eslintcache
+/frontend/npm-debug.log*
+/frontend/yarn-debug.log*
+/frontend/yarn-error.log*
+/frontend/pnpm-debug.log*
+
+# Test and coverage output
+coverage/
+test-results/
+playwright-report/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.cache/
+tmp/
+temp/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.fleet/
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
