@@ -4,7 +4,7 @@ use redis::aio::ConnectionManager;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing::info;
 
-use crate::{config::Config, crypto::TokenCipher};
+use crate::{config::Config, crypto::TokenCipher, logs::LogStore};
 
 /// Shared, cheaply-cloneable handles. Axum clones this per request, so
 /// everything in it is already internally reference-counted. `PgPool` and
@@ -20,6 +20,7 @@ pub struct AppState {
     pub redis: ConnectionManager,
     pub http: reqwest::Client,
     pub token_cipher: TokenCipher,
+    pub log_store: LogStore,
     pub config: Arc<Config>,
 }
 
@@ -31,6 +32,8 @@ pub enum StartupError {
     Redis(#[from] redis::RedisError),
     #[error("http client: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("log store: {0}")]
+    LogStore(String),
 }
 
 impl AppState {
@@ -67,12 +70,16 @@ impl AppState {
             .timeout(Duration::from_secs(15))
             .build()?;
         let token_cipher = TokenCipher::new(&config.token_encryption_key);
+        let log_store = LogStore::new(&config.s3).map_err(StartupError::LogStore)?;
+
+        info!(bucket = log_store.bucket_name(), "log store configured");
 
         Ok(Self {
             db,
             redis,
             http,
             token_cipher,
+            log_store,
             config: Arc::new(config),
         })
     }

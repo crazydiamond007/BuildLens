@@ -6,8 +6,8 @@ Each phase ships something runnable and is reviewed before the next starts.
 | ----- | ----- | ------ |
 | 1 | Foundation: repo layout, compose stack, schema, gateway skeleton | **done** |
 | 2 | Auth: GitHub OAuth, sessions, API tokens, user/org/membership endpoints | **done** |
-| 3 | Repository sync: GitHub client, repo/branch/commit sync, webhook receiver | **in review** |
-| 4 | Workflow ingestion: runs/jobs/steps, log storage to S3, event contracts | next after review |
+| 3 | Repository sync: GitHub client, repo/branch/commit sync, webhook receiver | **done** |
+| 4 | Workflow ingestion: runs/jobs/steps, log storage to S3, event contracts, outbox relay | **in review** |
 | 5 | Java analytics: DORA, flaky tests, scoring, scheduled recomputation | |
 | 6 | Python AI worker: build summaries and recommendations | |
 | 7 | Next.js dashboard | |
@@ -69,3 +69,11 @@ worth doing, but it needs an explicit decision to widen Phase 3's webhook scope.
 the reasoning that parsing test reports means downloading an artifact from GitHub
 and the gateway is what holds the credentials. If Phase 5 would rather Java did
 the parsing, that is a one-line change in `000010_grants.up.sql`.
+
+**Real GitHub Deployment API ingestion.** Phase 4 records deployments only by
+*inference* — a successful `push`/`release`/`workflow_dispatch` run on the default
+branch becomes a `workflow_inferred` production deployment. The schema already
+carries a `github_deployment` source and the gateway subscribes to
+`deployment_status` webhooks, but ingesting real Deployment objects is not wired
+yet. It is additive (a new source label, a new event branch) and can land in
+Phase 4.x or alongside Phase 5 without a schema change.
