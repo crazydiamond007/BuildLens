@@ -1,7 +1,7 @@
 # BuildLens local development stack.
 #
 #   make up      infrastructure only (postgres, redis, rabbitmq, minio) + migrations
-#   make up-all  the above plus the gateway container (profile: app)
+#   make up-all  the above plus all application containers (profile: app)
 #   make dev     infrastructure in docker, gateway on the host via cargo run
 #
 # Every dependency has a healthcheck, so `depends_on: condition: service_healthy`
@@ -192,6 +192,52 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8081/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  ai-worker:
+    profiles: ["app"]
+    build:
+      context: ./ai-worker
+      dockerfile: Dockerfile
+    environment:
+      AI_PORT: 8082
+      AI_DATABASE_URL: postgresql://buildlens_ai:${AI_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/${RABBITMQ_DEFAULT_VHOST}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      AI_MANUAL_TRIGGER_TOKEN: ${AI_MANUAL_TRIGGER_TOKEN}
+      AI_FAILURE_MODEL: ${AI_FAILURE_MODEL:-claude-opus-4-8}
+      AI_SUMMARY_MODEL: ${AI_SUMMARY_MODEL:-claude-haiku-4-5}
+      AI_MONTHLY_COST_CAP_USD: ${AI_MONTHLY_COST_CAP_USD:-10.00}
+      AI_SUCCESS_SUMMARIES_ENABLED: ${AI_SUCCESS_SUMMARIES_ENABLED:-false}
+      AI_SCHEDULED_REPORTS_ENABLED: ${AI_SCHEDULED_REPORTS_ENABLED:-false}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      S3_LOGS_BUCKET: ${MINIO_LOGS_BUCKET}
+    ports:
+      - "${AI_PORT:-8082}:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://localhost:8082/health', timeout=3)
       interval: 10s
       timeout: 5s
       retries: 10

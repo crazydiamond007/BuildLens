@@ -8,7 +8,7 @@
 //! `FOR UPDATE SKIP LOCKED` (so several replicas can drain concurrently without
 //! stepping on each other), publishes each with a broker confirm, and only marks
 //! a row published once the broker acks. A crash between the ack and the UPDATE
-//! re-publishes the row on restart — a duplicate, which consumers are required
+//! re-publishes the row on restart - a duplicate, which consumers are required
 //! to tolerate. The alternative, marking published before the ack, would lose
 //! events silently, and silent loss is the one thing the outbox exists to
 //! prevent.
@@ -157,7 +157,7 @@ impl From<sqlx::Error> for RelayError {
 }
 
 /// Claims up to `BATCH_SIZE` pending rows, publishes each, and records the
-/// outcome — all inside one transaction so the rows stay locked (and invisible
+/// outcome - all inside one transaction so the rows stay locked (and invisible
 /// to other replicas via SKIP LOCKED) until their fate is decided. Returns the
 /// number of rows claimed.
 async fn drain_batch(state: &AppState, channel: &Channel) -> Result<u64, RelayError> {

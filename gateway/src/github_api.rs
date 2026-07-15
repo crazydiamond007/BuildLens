@@ -34,7 +34,7 @@ pub async fn access_token(state: &AppState, user_id: Uuid) -> Result<String, App
         .map_err(AppError::from)
 }
 
-/// Finds a usable GitHub token to act on a repository outside a user request —
+/// Finds a usable GitHub token to act on a repository outside a user request -
 /// specifically, the webhook-triggered log capture, which has no session. Picks
 /// any organization member with a connected, unexpired GitHub account. This is a
 /// deliberate simplification for a portfolio project: a production system would
@@ -207,7 +207,7 @@ impl<'a> GitHubApi<'a> {
     /// short-lived storage URL on a different host; reqwest follows it and drops
     /// the `Authorization` header on the host change, which is exactly what the
     /// signed URL wants. Returns `None` when logs are absent (run still going,
-    /// or expired) rather than treating it as an error — logs are best-effort.
+    /// or expired) rather than treating it as an error - logs are best-effort.
     pub async fn run_logs_zip(
         &self,
         owner: &str,
@@ -516,7 +516,7 @@ pub struct GitHubEnvelope<T> {
 }
 
 /// The `workflow_run` object, shared by the REST list endpoint and the
-/// `workflow_run` webhook — they carry the same shape. There is no
+/// `workflow_run` webhook - they carry the same shape. There is no
 /// `completed_at`; when `status == "completed"` the run's `updated_at` is the
 /// completion time, which is how the ingest maps it.
 #[derive(Clone, Debug, Deserialize)]

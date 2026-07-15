@@ -39,9 +39,9 @@ up: ## Start infrastructure (postgres, redis, rabbitmq, minio) and run migration
 	@echo "  minio      localhost:$(MINIO_CONSOLE_PORT) (console)"
 
 .PHONY: up-all
-up-all: ## Start infrastructure, gateway, and analytics containers
+up-all: ## Start infrastructure and all application containers
 	$(MAKE) up
-	$(COMPOSE) --profile app up -d --build --wait --no-deps gateway analytics
+	$(COMPOSE) --profile app up -d --build --wait --no-deps gateway analytics ai-worker
 
 .PHONY: down
 down: ## Stop everything (volumes preserved)
@@ -129,6 +129,23 @@ analytics-check: ## Compile analytics with warnings denied
 .PHONY: analytics-test
 analytics-test: ## Run analytics unit tests
 	cd analytics && mvn test
+
+## ---------------------------------------------------------------------------
+## AI worker (Python / FastAPI / UV)
+## ---------------------------------------------------------------------------
+
+.PHONY: ai-dev
+ai-dev: ## Run the AI worker on the host against dockerised infrastructure
+	cd ai-worker && uv run uvicorn buildlens_ai.main:app --reload --port $${AI_PORT:-8082}
+
+.PHONY: ai-check
+ai-check: ## Check AI worker formatting and lint
+	cd ai-worker && uv run --frozen ruff format --check .
+	cd ai-worker && uv run --frozen ruff check .
+
+.PHONY: ai-test
+ai-test: ## Run AI worker tests
+	cd ai-worker && uv run --frozen pytest
 
 .PHONY: help
 help:
