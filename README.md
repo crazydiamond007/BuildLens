@@ -49,6 +49,151 @@ curl localhost:8080/health/ready   # readiness: can it reach its dependencies?
 
 `make help` lists the rest.
 
+## Running the full pipeline end to end
+
+The steps below take a fresh checkout all the way to a real GitHub Actions run
+showing up as facts in Postgres, an event on RabbitMQ, and a log archive in
+MinIO. Run them in order.
+
+### 0. Prerequisites
+
+- Docker and Docker Compose.
+- Rust 1.94+ (the gateway runs on the host via `make dev`).
+- Node.js (for the webhook tunnel in step 3), or any equivalent tunnel.
+- A **GitHub OAuth App** (Settings → Developer settings → OAuth Apps). Set its
+  callback URL to `http://localhost:8080/auth/github/callback`. Note the client
+  ID and generate a client secret.
+- A **webhook forwarding URL** for local development, e.g. a channel from
+  [smee.io](https://smee.io). GitHub can't reach `localhost`, so it delivers to
+  this public URL and the tunnel forwards to the gateway.
+
+### 1. Configure `.env`
+
+```bash
+make env       # copies .env.example -> .env (does not overwrite an existing one)
+```
+
+Then fill in, in `.env`:
+
+- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` — from the OAuth App above.
+- `GITHUB_REDIRECT_URI` — `http://localhost:8080/auth/github/callback`.
+- `GITHUB_WEBHOOK_URL` — your public tunnel URL (the smee channel). This is what
+  BuildLens registers on each tracked repository.
+- `GITHUB_WEBHOOK_SECRET` — any string of 32+ characters. BuildLens signs and
+  verifies deliveries with it.
+- `TOKEN_ENCRYPTION_KEY` — 32 bytes, base64-encoded (`openssl rand -base64 32`).
+  The all-zero default is for throwaway local use only.
+
+The RabbitMQ and S3/MinIO values already point at the compose services and need
+no changes for local development.
+
+### 2. Start the infrastructure
+
+```bash
+make up         # postgres, redis, rabbitmq, minio, then runs all migrations
+```
+
+This also creates the `buildlens-logs` / `buildlens-artifacts` MinIO buckets and
+the three per-service Postgres roles.
+
+### 3. Start the webhook tunnel (leave running)
+
+Forward your public webhook URL to the gateway's receiver. With smee:
+
+```bash
+npx smee-client --url "$GITHUB_WEBHOOK_URL" --target http://localhost:8080/webhooks/github
+```
+
+The `--target` path must be `/webhooks/github`. GitHub signs each delivery with
+`GITHUB_WEBHOOK_SECRET`; the tunnel forwards the signature header unchanged, so
+verification still passes.
+
+### 4. Start the gateway (leave running)
+
+```bash
+make dev
+```
+
+Watch the log for `log store configured` and `outbox relay connected to
+rabbitmq`, then confirm it is healthy:
+
+```bash
+curl localhost:8080/health         # liveness
+curl localhost:8080/health/ready   # readiness: postgres + redis reachable
+```
+
+### 5. Log in with GitHub
+
+Open **http://localhost:8080/auth/github/login** in a browser and approve. This
+completes the OAuth round-trip, stores your GitHub token (encrypted), creates
+your personal organization, and sets the `buildlens_session` cookie.
+
+Find your organization id and copy the session cookie for the API calls below —
+in the same browser, open **http://localhost:8080/me** for the org `id`, and copy
+the `buildlens_session` cookie value from the browser dev tools.
+
+### 6. Discover and track a repository
+
+List what you can see (session-only):
+
+```
+http://localhost:8080/github/repositories
+```
+
+Then track one. This requires the BuildLens `admin` role (your personal org owner
+qualifies) **and** GitHub repository admin permission, because BuildLens registers
+the webhook for you. It also queues the initial backfill.
+
+```bash
+curl -X PUT \
+  --cookie "buildlens_session=<COOKIE>" \
+  http://localhost:8080/organizations/<ORG_ID>/github-repositories/<GITHUB_REPO_ID>/tracking
+```
+
+The backfill walks branches → commits → pull requests → workflows → workflow runs
+(with their jobs and steps), checkpointing each page so a failed run resumes when
+you repeat the call.
+
+### 7. Trigger a run and watch it flow
+
+Push a commit (or re-run a workflow) on the tracked repository. Then observe each
+stage:
+
+```bash
+make psql   # then, in the psql shell:
+SELECT github_run_id, status, conclusion, is_default_branch
+  FROM workflow_runs ORDER BY created_at DESC LIMIT 5;
+SELECT status, event_type FROM event_outbox        -- flips to 'published'
+  ORDER BY created_at DESC LIMIT 5;
+SELECT object_key, size_bytes FROM build_logs      -- run logs captured
+  ORDER BY created_at DESC LIMIT 5;
+```
+
+To watch the messages on the bus, bind a throwaway queue to the events exchange
+**before** the run (a topic exchange drops messages with no bound queue):
+
+```bash
+curl -s -u buildlens:buildlens_dev_password -H content-type:application/json \
+  -XPUT  http://localhost:15672/api/queues/buildlens/observe -d '{"durable":true}'
+curl -s -u buildlens:buildlens_dev_password -H content-type:application/json \
+  -XPOST http://localhost:15672/api/bindings/buildlens/e/buildlens.events/q/observe \
+  -d '{"routing_key":"#"}'
+```
+
+Then, using `buildlens` / `buildlens_dev_password`:
+
+- **RabbitMQ** — http://localhost:15672 → Queues → `observe` shows the
+  `workflow_run.completed` / `deployment.recorded` messages arriving.
+- **MinIO** — http://localhost:9001 → the `buildlens-logs` bucket holds the run
+  log zips.
+
+### 8. Shut down
+
+```bash
+make down       # stop everything, keep data volumes
+make reset      # stop everything and DELETE all volumes
+```
+
 ## Phase 2 API
 
 | Method | Path | Purpose |
