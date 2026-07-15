@@ -1,5 +1,11 @@
 # BuildLens
 
+[![CI](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml/badge.svg)](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml)
+[![Phase](https://img.shields.io/badge/phase-2%20complete-2ea44f.svg)](#status)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-000000.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1.svg?logo=postgresql&logoColor=white)](#requires)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?logo=docker&logoColor=white)](#quick-start)
+
 DevOps analytics for GitHub Actions. Collects CI/CD data, computes DORA metrics
 and build health, and explains failures.
 
