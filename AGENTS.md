@@ -33,10 +33,13 @@ the live stack: a signed `workflow_run` webhook produces `workflow_runs` /
 `event_outbox` rows written in the ingest transaction, and the relay publishes both
 to the `buildlens.events` topic exchange with publisher confirms — a bound test
 queue received both messages, each carrying the envelope with its `message_id`
-idempotency key. A duplicate run emitted no new events (idempotent emission). The
-untested-at-runtime paths are the ones needing real GitHub: live Actions backfill
-and webhook-triggered log capture (log capture correctly *skips* when no member
-token is available). **Phases 5-8 do not exist yet:** no Java, Python, or frontend.
+idempotency key. A duplicate run emitted no new events (idempotent emission).
+Since verified against a **real** repository: tracking `crazydiamond007/Webhook`
+backfilled 12 branches, 48 commits, 11 PRs, 1 workflow, 38 runs, 152 jobs, 1317
+steps and 8 inferred deployments, and the relay published all 46 events. The one
+path still unconfirmed on real data is webhook-time log capture on a *live* run
+(backfill deliberately does not fetch logs). **Phases 5-8 do not exist yet:** no
+Java, Python, or frontend. Phase 5 (Java analytics) is next — brief at the bottom.
 
 Phase list and the reasoning behind each Phase 1 decision: `docs/phases.md`.
 
@@ -355,3 +358,99 @@ existing RabbitMQ/MinIO vars; the gateway now depends on both being healthy.
 DORA / scoring / flaky-test analytics (Phase 5, Java — it reads these facts and the
 events). JUnit parsing into `test_results`. Real GitHub Deployment API ingestion.
 Anything Python or frontend.
+
+---
+
+## Phase 5: DORA, scoring & flaky-test analytics (Java). Next — brief.
+
+Phase 5 is the **first non-Rust service and the first consumer**. The gateway now
+produces facts (in Postgres) and events (on RabbitMQ). Analytics turns them into the
+derived numbers the dashboard shows: DORA, build/repo scores, flaky tests. It is
+Spring Boot, and it writes **only** the derivation tables — nothing it touches is a
+fact from GitHub. **This is the Rust→Java boundary; the calls below are the ones the
+owner should confirm before Codex starts.**
+
+### Decisions to lock in
+
+**Analytics reads facts and writes only derivations — the grants already enforce
+it.** The service connects as the `buildlens_analytics` role and can `INSERT` /
+`UPDATE` / `DELETE` exactly four tables: `dora_metrics`, `repository_scores`,
+`build_scores`, `flaky_tests` (`000010_grants.up.sql`). It **physically cannot**
+write `workflow_runs` or any other fact. Do not work around this; it is invariant #2.
+
+**The schema is validate-only.** `spring.jpa.hibernate.ddl-auto=validate`, and
+Flyway/Liquibase **disabled** (invariant #1). `infra/migrations` owns the schema.
+Map JPA entities onto the existing tables; if an entity does not match, fix the
+entity, not the database. A genuinely new table (see the open decisions) goes
+through `make migrate-create` **with a grant**, never a service-side migration.
+
+**Events are triggers; Postgres is the source of truth.** Consume
+`workflow_run.completed` and `deployment.recorded`, **dedupe on the envelope `id`**
+(delivery is at-least-once — invariant #5), then read the facts from Postgres and
+recompute. Do not try to compute from the event payload alone. **Boundary flag:** if
+you would rather events carried the full computed detail, that is a change to
+`contracts/` to make *now*, before a consumer exists to break.
+
+**The consumer owns its topology.** Declare a durable queue (e.g.
+`analytics.workflow_runs`) bound to `buildlens.events` on `workflow_run.*` and
+`deployment.*`, with `x-dead-letter-exchange = buildlens.events.dlx`. The gateway
+declares only the exchanges. Ack a message only after its row is committed (or it is
+dead-lettered). A `version` the consumer does not understand is dead-lettered, not
+crashed on.
+
+**Recompute is truncate-and-rebuild-per-key, so it is idempotent by construction.**
+Every metric is a pure function of the facts. Write it as an UPSERT on the natural
+key — the two partial unique indexes on `dora_metrics`, the `UNIQUE`
+`build_scores.workflow_run_id`, `flaky_tests (repository_id, test_key)`. A duplicate
+event recomputes the same row; never append. Because of this, a separate
+processed-events ledger is probably unnecessary — flag it if you think strict
+once-only side effects are needed, because that ledger would need a migration + grant.
+
+**Percentiles, not means.** `dora_metrics` stores `lead_time_p50/p90`, `mttr_p50/p90`
+and `sample_size`. Compute distributions and populate `sample_size` honestly — the UI
+uses it to decline drawing a confident line through four data points.
+
+### Scope to build
+
+- **A Spring Boot service in `analytics/`** (pick Gradle or Maven), connecting as
+  `buildlens_analytics`, `ddl-auto=validate`, added to `docker-compose.yml` under the
+  `app` profile with `depends_on` postgres/rabbitmq healthy + migrator completed.
+- **A Spring AMQP consumer** on its own queue, idempotent on the envelope `id`,
+  dead-lettering poison / unknown-version messages.
+- **DORA → `dora_metrics`**, per repo and per-org rollup, at daily/weekly/monthly
+  granularity: deployment frequency (from `deployments`), lead time (commit
+  `authored_at` → deployment `deployed_at`), change failure rate + MTTR, plus
+  `performance_band` and `sample_size`.
+- **Flaky-test detection → `flaky_tests`**: flips on an unchanged commit (needs
+  `test_results` populated — see the open decision).
+- **Scoring → `build_scores`** (one row per run) **and `repository_scores`**
+  (trailing window, history retained).
+- **Scheduled recompute** (`@Scheduled`) to roll trailing windows forward and cover
+  periods the event stream did not touch.
+
+### Config to add
+
+`ANALYTICS_DB_PASSWORD` and the `buildlens_analytics` `DATABASE_URL` (the role and
+password already exist), and `RABBITMQ_URL` (same broker). No S3 unless analytics
+ends up parsing artifacts — see below.
+
+### Open decisions (resolve before/early in Phase 5)
+
+- **Who parses JUnit XML into `test_results`?** Flaky detection needs it populated,
+  and `test_results` is currently granted to the **gateway** (it holds the GitHub
+  credentials to download the artifact). Two options: **(a, recommended)** the
+  gateway parses on `workflow_run.completed` and writes `test_results` (a Rust
+  Phase 4.x add), leaving analytics a pure Postgres+events consumer; or **(b)** move
+  the grant to analytics, and Java downloads + parses (needs GitHub creds and S3 in
+  the Java service). Decide before flaky detection is built.
+- **The precise lead-time definition** — first-commit `authored_at` of the change →
+  `deployed_at` of the deployment that shipped it. `workflow_runs.head_commit_id` is
+  a soft FK; decide the fallback when it is null (match on `sha`).
+- **Fat vs thin events** (as flagged above).
+
+### Deliberately absent (do NOT build in Phase 5)
+
+The Python AI worker (Phase 6) and the Next.js frontend (Phase 7). No new gateway
+features — if analytics needs a fact that is not ingested yet, flag it back to a
+gateway change, do not synthesise it. No schema migrations except (if agreed) the
+JUnit grant move, and that goes through `infra/migrations`.
