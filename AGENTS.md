@@ -178,7 +178,7 @@ infra/migrations/ 12 migrations, 28 application tables. The schema source of tru
 infra/postgres/   init/01-roles.sh: creates the 3 service roles (passwords can't
                   live in a migration, so role creation cannot either)
 infra/minio/      bootstrap.sh: creates the buckets
-contracts/        the event envelope, per-event examples, topology, versioning
+contracts/        per-event example payloads (the contract spec lives in README.md)
 analytics/        Java 25 + Spring Boot. Rabbit consumer and derived analytics.
 ai-worker/        Python + FastAPI + UV. Grounded AI reports and recommendations.
 frontend/         empty. Phase 7.
