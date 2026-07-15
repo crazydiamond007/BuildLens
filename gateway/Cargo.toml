@@ -18,6 +18,7 @@ tokio-executor-trait = "2.1.1"
 tokio-reactor-trait = "1.1.0"
 redis = { version = "1.4.0", features = ["tokio-comp", "connection-manager"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+quick-xml = { version = "0.41.0", features = ["serialize"] }
 # S3 client for build-log storage. Lighter than aws-sdk-s3 and MinIO-friendly
 # (path-style addressing). rustls to match the rest of the TLS stack.
 rust-s3 = { version = "0.35.1", default-features = false, features = ["tokio-rustls-tls"] }
@@ -36,6 +37,7 @@ tower-http = { version = "0.7.0", features = ["trace", "request-id", "util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.22.0", features = ["serde", "v7"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

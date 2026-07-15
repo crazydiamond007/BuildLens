@@ -19,6 +19,7 @@
 
 # Java, Gradle, and Maven
 /analytics/build/
+/analytics/target/
 /analytics/.gradle/
 /analytics/out/
 /analytics/.classpath

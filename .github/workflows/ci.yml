@@ -59,6 +59,28 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+  analytics:
+    name: Analytics / Java
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: analytics
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Compile and run tests with warnings denied
+        run: mvn --batch-mode test package
+
   migrations:
     name: Database / Migrations
     runs-on: ubuntu-latest
@@ -114,23 +136,27 @@ jobs:
       - name: Prepare CI environment
         run: cp .env.example .env
 
-      - name: Start gateway dependencies
-        run: docker compose up -d --wait postgres redis
+      - name: Start application dependencies
+        run: docker compose up -d --wait postgres redis rabbitmq minio
 
       - name: Apply migrations
         run: docker compose run --rm migrator
 
-      - name: Build and start gateway image
-        run: docker compose --profile app up -d --build --wait --no-deps gateway
+      - name: Create object-storage buckets
+        run: docker compose run --rm minio-init
+
+      - name: Build and start application images
+        run: docker compose --profile app up -d --build --wait --no-deps gateway analytics
 
       - name: Check liveness and readiness
         run: |
           curl --fail --silent --show-error http://localhost:8080/health
           curl --fail --silent --show-error http://localhost:8080/health/ready
+          curl --fail --silent --show-error http://localhost:8081/actuator/health
 
-      - name: Show gateway logs after failure
+      - name: Show application logs after failure
         if: failure()
-        run: docker compose --profile app logs gateway
+        run: docker compose --profile app logs gateway analytics
 
       - name: Stop application services
         if: always()

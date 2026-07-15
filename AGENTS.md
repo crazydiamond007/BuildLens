@@ -9,7 +9,7 @@ shared Postgres.
 
 ---
 
-## Status: Phase 4 implemented on its feature branch and pending owner review.
+## Status: Phase 5 implemented on its feature branch and pending owner review.
 
 Phase 1 delivered infrastructure and the full database schema. Phase 2 delivered
 GitHub OAuth, Redis sessions, API tokens, unified authentication, organization and
@@ -24,7 +24,7 @@ Phase 3 is merged (repository discovery and opt-in tracking, automatic webhook
 registration, resumable branch/commit/PR sync, signed webhook persistence, and
 background processing for `push`, `pull_request`, and `pull_request_review`).
 
-Phase 4 is implemented on `feat/phase-4-...`: workflow ingestion (runs/jobs/steps,
+Phase 4 is merged: workflow ingestion (runs/jobs/steps,
 per-attempt), workflow-run backfill, build-log storage to MinIO, inferred
 deployments, the event contract in `contracts/`, and — the headline — the
 transactional-outbox relay that publishes to RabbitMQ. Verified end-to-end against
@@ -38,8 +38,19 @@ Since verified against a **real** repository: tracking `crazydiamond007/Webhook`
 backfilled 12 branches, 48 commits, 11 PRs, 1 workflow, 38 runs, 152 jobs, 1317
 steps and 8 inferred deployments, and the relay published all 46 events. The one
 path still unconfirmed on real data is webhook-time log capture on a *live* run
-(backfill deliberately does not fetch logs). **Phases 5-8 do not exist yet:** no
-Java, Python, or frontend. Phase 5 (Java analytics) is next — brief at the bottom.
+(backfill deliberately does not fetch logs).
+
+Phase 5 is implemented on `feat/phase-5-java-analytics`: a Java 25 / Spring Boot
+4.1 analytics service consumes the two thin events, validates the migration-owned
+schema, and writes DORA rollups, build/repository scores, and flaky-test verdicts.
+The gateway now parses bounded JUnit artifacts into `test_results`. Live-stack
+verification covered Postgres 18.4 validation, RabbitMQ queue/bindings/consumer,
+valid workflow and deployment triggers, duplicate recomputation with unchanged row
+counts, unknown-version dead-lettering, the Compose container health check, and the
+analytics role grant boundary. No tracked real run currently exposes a JUnit
+artifact, so artifact capture is covered by parser tests but is not yet confirmed
+end-to-end against GitHub. **Phases 6-8 do not exist yet:** no Python worker or
+frontend. Phase 6 is next only after owner review and Phase 5 merge.
 
 Phase list and the reasoning behind each Phase 1 decision: `docs/phases.md`.
 
@@ -55,7 +66,7 @@ directory with a README is the correct state for work that has not been approved
 not receive finished code. Where the Rust/Java/Python boundary or an event contract
 needs a judgement call, surface it rather than silently picking.
 
-**Keep changes scoped to the current phase.** Phases 1–3 are merged. Phase 4 is in
+**Keep changes scoped to the current phase.** Phases 1–4 are merged. Phase 5 is in
 review. Work each phase on its own branch (`feat/phase-N-...`) and open it for
 review before it merges — the owner reviews, with Claude, before the next phase
 starts.
@@ -148,13 +159,14 @@ gateway/          Rust + Axum. Auth, GitHub API, sync, and webhook ingestion.
   src/events.rs     the outbox writer and the event envelope
   src/relay.rs      the outbox -> RabbitMQ relay (topology, confirms, backoff)
   src/logs.rs       build-log storage to S3/MinIO (best-effort, off the hot path)
+  src/junit.rs      bounded JUnit artifact parsing into test_results
   src/routes/       auth/tenancy/tokens plus repository discovery and tracking
 infra/migrations/ 11 migrations, 27 tables. The source of truth for the schema.
 infra/postgres/   init/01-roles.sh: creates the 3 service roles (passwords can't
                   live in a migration, so role creation cannot either)
 infra/minio/      bootstrap.sh: creates the buckets
 contracts/        the event envelope, per-event examples, topology, versioning
-analytics/        empty. Phase 5.
+analytics/        Java 25 + Spring Boot. Rabbit consumer and derived analytics.
 ai-worker/        empty. Phase 6.
 frontend/         empty. Phase 7.
 docs/phases.md    the decision log; read it
@@ -174,8 +186,8 @@ membership mutations require a session. Personal organizations cannot accept
 extra members. Team organizations serialize membership mutations by locking the
 organization row, and they must always retain an owner.
 
-Gate on `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
-`cargo test`; all pass today.
+Gate the gateway on `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, and `cargo test`. Gate analytics on `mvn test package`; all pass today.
 
 ---
 
@@ -191,7 +203,7 @@ added: `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI`,
 
 ---
 
-## Phase 3: Repository sync & webhooks (Rust). Implemented, pending review.
+## Phase 3: Repository sync & webhooks (Rust). Delivered.
 
 Phase 3 is where facts start flowing out of GitHub. Phase 2 left us a logged-in
 user with an encrypted OAuth token; Phase 3 uses it to populate the repository side
@@ -291,15 +303,13 @@ review timestamp and webhook processing keeps it current.
 and GitHub repository admin permission. Registration failures are returned to the
 caller; the repository is not marked tracked when its hook is absent.
 
-**Who parses JUnit XML into `test_results`?** (Phase 5 concern, noted here so it is
-not forgotten.) Currently granted to the gateway, on the reasoning that parsing test
-reports means downloading an artifact from GitHub and the gateway holds the
-credentials. If Phase 5 would rather Java did it, that is a one-line change in
-`000010_grants.up.sql`.
+**Who parses JUnit XML into `test_results`?** This was resolved in Phase 5: the
+gateway downloads and parses bounded JUnit artifacts because it already holds the
+GitHub credentials. The existing grant therefore remains unchanged.
 
 ---
 
-## Phase 4: Workflow ingestion, log storage & the event relay (Rust). Implemented, pending review.
+## Phase 4: Workflow ingestion, log storage & the event relay (Rust). Delivered.
 
 Phase 4 turns builds into facts and stands up the message bus. Still **Rust-only** —
 no Java or Python — but it defines the contract those services will consume.
@@ -353,7 +363,7 @@ installation token instead; this is a deliberate portfolio-scope simplification.
 / `S3_LOGS_BUCKET`. All required at boot. `docker-compose.yml` maps them from the
 existing RabbitMQ/MinIO vars; the gateway now depends on both being healthy.
 
-### Deliberately absent (do NOT build in Phase 4)
+### Deliberately absent when Phase 4 shipped
 
 DORA / scoring / flaky-test analytics (Phase 5, Java — it reads these facts and the
 events). JUnit parsing into `test_results`. Real GitHub Deployment API ingestion.
@@ -361,16 +371,16 @@ Anything Python or frontend.
 
 ---
 
-## Phase 5: DORA, scoring & flaky-test analytics (Java). Next — brief.
+## Phase 5: DORA, scoring & flaky-test analytics (Java). Implemented, pending review.
 
 Phase 5 is the **first non-Rust service and the first consumer**. The gateway now
 produces facts (in Postgres) and events (on RabbitMQ). Analytics turns them into the
 derived numbers the dashboard shows: DORA, build/repo scores, flaky tests. It is
 Spring Boot, and it writes **only** the derivation tables — nothing it touches is a
 fact from GitHub. **This is the Rust→Java boundary; the calls below are the ones the
-owner should confirm before Codex starts.**
+owner confirmed before implementation.**
 
-### Decisions to lock in
+### Decisions locked in
 
 **Analytics reads facts and writes only derivations — the grants already enforce
 it.** The service connects as the `buildlens_analytics` role and can `INSERT` /
@@ -381,15 +391,14 @@ write `workflow_runs` or any other fact. Do not work around this; it is invarian
 **The schema is validate-only.** `spring.jpa.hibernate.ddl-auto=validate`, and
 Flyway/Liquibase **disabled** (invariant #1). `infra/migrations` owns the schema.
 Map JPA entities onto the existing tables; if an entity does not match, fix the
-entity, not the database. A genuinely new table (see the open decisions) goes
+entity, not the database. A genuinely new table goes
 through `make migrate-create` **with a grant**, never a service-side migration.
 
 **Events are triggers; Postgres is the source of truth.** Consume
-`workflow_run.completed` and `deployment.recorded`, **dedupe on the envelope `id`**
-(delivery is at-least-once — invariant #5), then read the facts from Postgres and
-recompute. Do not try to compute from the event payload alone. **Boundary flag:** if
-you would rather events carried the full computed detail, that is a change to
-`contracts/` to make *now*, before a consumer exists to break.
+`workflow_run.completed` and `deployment.recorded`, validate that the AMQP
+`message_id` matches the envelope `id`, then read the facts from Postgres and
+recompute. Delivery is at-least-once (invariant #5), so duplicate envelopes must
+produce the same natural-key rows. Do not compute from the event payload alone.
 
 **The consumer owns its topology.** Declare a durable queue (e.g.
 `analytics.workflow_runs`) bound to `buildlens.events` on `workflow_run.*` and
@@ -398,7 +407,7 @@ declares only the exchanges. Ack a message only after its row is committed (or i
 dead-lettered). A `version` the consumer does not understand is dead-lettered, not
 crashed on.
 
-**Recompute is truncate-and-rebuild-per-key, so it is idempotent by construction.**
+**Recompute is natural-key replacement, so it is idempotent by construction.**
 Every metric is a pure function of the facts. Write it as an UPSERT on the natural
 key — the two partial unique indexes on `dora_metrics`, the `UNIQUE`
 `build_scores.workflow_run_id`, `flaky_tests (repository_id, test_key)`. A duplicate
@@ -410,47 +419,49 @@ once-only side effects are needed, because that ledger would need a migration + 
 and `sample_size`. Compute distributions and populate `sample_size` honestly — the UI
 uses it to decline drawing a confident line through four data points.
 
-### Scope to build
+### Delivered scope
 
-- **A Spring Boot service in `analytics/`** (pick Gradle or Maven), connecting as
+- **A Maven Spring Boot service in `analytics/`**, connecting as
   `buildlens_analytics`, `ddl-auto=validate`, added to `docker-compose.yml` under the
   `app` profile with `depends_on` postgres/rabbitmq healthy + migrator completed.
-- **A Spring AMQP consumer** on its own queue, idempotent on the envelope `id`,
-  dead-lettering poison / unknown-version messages.
+- **A Spring AMQP consumer** on its own queue, validating the AMQP/envelope
+  identity, recomputing idempotently, and dead-lettering poison / unknown-version
+  messages.
 - **DORA → `dora_metrics`**, per repo and per-org rollup, at daily/weekly/monthly
   granularity: deployment frequency (from `deployments`), lead time (commit
   `authored_at` → deployment `deployed_at`), change failure rate + MTTR, plus
   `performance_band` and `sample_size`.
-- **Flaky-test detection → `flaky_tests`**: flips on an unchanged commit (needs
-  `test_results` populated — see the open decision).
+- **Flaky-test detection → `flaky_tests`**: flips between run attempts on an
+  unchanged commit in the same workflow, after collapsing matrix-job outcomes
+  per run. Flake rate divides by comparable retry transitions.
 - **Scoring → `build_scores`** (one row per run) **and `repository_scores`**
   (trailing window, history retained).
 - **Scheduled recompute** (`@Scheduled`) to roll trailing windows forward and cover
   periods the event stream did not touch.
 
-### Config to add
+### Config added
 
 `ANALYTICS_DB_PASSWORD` and the `buildlens_analytics` `DATABASE_URL` (the role and
-password already exist), and `RABBITMQ_URL` (same broker). No S3 unless analytics
-ends up parsing artifacts — see below.
+password already exist), and `RABBITMQ_URL` (same broker). Analytics needs no S3 or
+GitHub credentials because the gateway owns artifact ingestion.
 
-### Open decisions (resolve before/early in Phase 5)
+### Decisions resolved during Phase 5
 
-- **Who parses JUnit XML into `test_results`?** Flaky detection needs it populated,
-  and `test_results` is currently granted to the **gateway** (it holds the GitHub
-  credentials to download the artifact). Two options: **(a, recommended)** the
-  gateway parses on `workflow_run.completed` and writes `test_results` (a Rust
-  Phase 4.x add), leaving analytics a pure Postgres+events consumer; or **(b)** move
-  the grant to analytics, and Java downloads + parses (needs GitHub creds and S3 in
-  the Java service). Decide before flaky detection is built.
-- **The precise lead-time definition** — first-commit `authored_at` of the change →
-  `deployed_at` of the deployment that shipped it. `workflow_runs.head_commit_id` is
-  a soft FK; decide the fallback when it is null (match on `sha`).
-- **Fat vs thin events** (as flagged above).
+- **The gateway parses JUnit.** On a completed live run it lists GitHub artifacts,
+  applies archive/XML size and count ceilings, parses JUnit off the webhook task,
+  and upserts `test_results`. Analytics receives no GitHub or S3 credentials.
+- **Lead time uses the deployed commit's `authored_at`.** Resolve the direct
+  `commit_id` first, then `(repository_id, sha)`. An unresolved commit remains in
+  deployment frequency/CFR and is excluded only from the lead-time distribution.
+- **Events stay thin.** Postgres remains the source of truth; the existing
+  `contracts/` envelope did not change.
+- **No processed-event ledger.** All side effects are deterministic natural-key
+  upserts. Duplicate delivery recomputes the same rows; strict once-only side
+  effects would justify a ledger later, but none exist in Phase 5.
 
 ### Deliberately absent (do NOT build in Phase 5)
 
 The Python AI worker (Phase 6) and the Next.js frontend (Phase 7). No new gateway
-features — if analytics needs a fact that is not ingested yet, flag it back to a
-gateway change, do not synthesise it. No schema migrations except (if agreed) the
-JUnit grant move, and that goes through `infra/migrations`.
+features beyond the agreed JUnit artifact seam. If analytics needs another fact
+that is not ingested yet, flag it back to a gateway change; do not synthesise it.
+No Phase 5 schema migration was needed.

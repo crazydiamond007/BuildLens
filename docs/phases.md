@@ -7,8 +7,8 @@ Each phase ships something runnable and is reviewed before the next starts.
 | 1 | Foundation: repo layout, compose stack, schema, gateway skeleton | **done** |
 | 2 | Auth: GitHub OAuth, sessions, API tokens, user/org/membership endpoints | **done** |
 | 3 | Repository sync: GitHub client, repo/branch/commit sync, webhook receiver | **done** |
-| 4 | Workflow ingestion: runs/jobs/steps, log storage to S3, event contracts, outbox relay | **in review** |
-| 5 | Java analytics: DORA, flaky tests, scoring, scheduled recomputation | |
+| 4 | Workflow ingestion: runs/jobs/steps, log storage to S3, event contracts, outbox relay | **done** |
+| 5 | Java analytics: DORA, flaky tests, scoring, scheduled recomputation | **in review** |
 | 6 | Python AI worker: build summaries and recommendations | |
 | 7 | Next.js dashboard | |
 | 8 | Testing, hardening, deployment | |
@@ -65,10 +65,11 @@ populated: filling it needs `pull_request_review` events, which are not yet
 ingested. Review latency is the most interesting slice of lead time, so this is
 worth doing, but it needs an explicit decision to widen Phase 3's webhook scope.
 
-**Who parses JUnit XML.** `test_results` is currently writable by the gateway, on
-the reasoning that parsing test reports means downloading an artifact from GitHub
-and the gateway is what holds the credentials. If Phase 5 would rather Java did
-the parsing, that is a one-line change in `000010_grants.up.sql`.
+**Who parses JUnit XML.** Decided in Phase 5: the gateway downloads bounded run
+artifacts and parses JUnit XML after `workflow_run.completed`, because it already
+holds GitHub credentials and owns observed facts. Analytics remains a pure
+Postgres + RabbitMQ consumer. The scheduled analytics pass closes the intentional
+race between immediate events and best-effort post-commit artifact capture.
 
 **Real GitHub Deployment API ingestion.** Phase 4 records deployments only by
 *inference* — a successful `push`/`release`/`workflow_dispatch` run on the default

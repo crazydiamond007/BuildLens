@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::{error::AppError, state::AppState};
 
 const API_VERSION: &str = "2022-11-28";
+const MAX_ARTIFACT_DOWNLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 pub async fn access_token(state: &AppState, user_id: Uuid) -> Result<String, AppError> {
     let encrypted = sqlx::query(
@@ -240,6 +241,92 @@ impl<'a> GitHubApi<'a> {
             .await
             .map_err(|error| AppError::Upstream(error.to_string()))?;
         Ok(Some(bytes.to_vec()))
+    }
+
+    /// Lists a bounded first page of artifacts uploaded by one workflow run,
+    /// sorting it oldest first locally. Later replacement reports then win when
+    /// the JUnit ingester collapses run-level outcomes.
+    pub async fn run_artifacts(
+        &self,
+        owner: &str,
+        repository: &str,
+        run_id: i64,
+        limit: usize,
+    ) -> Result<Vec<GitHubArtifact>, AppError> {
+        let mut url = self.endpoint(&[
+            "repos",
+            owner,
+            repository,
+            "actions",
+            "runs",
+            &run_id.to_string(),
+            "artifacts",
+        ])?;
+        url.query_pairs_mut()
+            .append_pair("per_page", &limit.clamp(1, 100).to_string());
+        let page = self.page_envelope::<GitHubArtifactsPage>(url, None).await?;
+        let mut artifacts = page.body.map_or_else(Vec::new, |body| body.artifacts);
+        artifacts.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then(left.id.cmp(&right.id))
+        });
+        Ok(artifacts)
+    }
+
+    /// Downloads one artifact archive with a hard byte ceiling. GitHub normally
+    /// supplies Content-Length, but the streaming limit also covers redirects
+    /// or proxies that omit it.
+    pub async fn artifact_zip(
+        &self,
+        owner: &str,
+        repository: &str,
+        artifact_id: i64,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let url = self.endpoint(&[
+            "repos",
+            owner,
+            repository,
+            "actions",
+            "artifacts",
+            &artifact_id.to_string(),
+            "zip",
+        ])?;
+        let mut response = self
+            .request(self.state.http.get(url))
+            .send()
+            .await
+            .map_err(|error| AppError::Upstream(error.to_string()))?;
+        if response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::GONE {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            return Err(api_error(status, &headers, response.text().await.ok()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_ARTIFACT_DOWNLOAD_BYTES as u64)
+        {
+            return Err(AppError::Upstream(format!(
+                "GitHub artifact {artifact_id} exceeds the {MAX_ARTIFACT_DOWNLOAD_BYTES}-byte limit"
+            )));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| AppError::Upstream(error.to_string()))?
+        {
+            if bytes.len() + chunk.len() > MAX_ARTIFACT_DOWNLOAD_BYTES {
+                return Err(AppError::Upstream(format!(
+                    "GitHub artifact {artifact_id} exceeded the {MAX_ARTIFACT_DOWNLOAD_BYTES}-byte limit"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(Some(bytes))
     }
 
     pub async fn first_review_at(
@@ -520,6 +607,22 @@ pub struct GitHubStep {
 pub struct GitHubJobsPage {
     #[serde(default)]
     pub jobs: Vec<GitHubJob>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GitHubArtifact {
+    pub id: i64,
+    pub name: String,
+    pub size_in_bytes: i64,
+    #[serde(default)]
+    pub expired: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+struct GitHubArtifactsPage {
+    #[serde(default)]
+    artifacts: Vec<GitHubArtifact>,
 }
 
 fn api_error(
