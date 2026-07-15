@@ -13,6 +13,7 @@ pub enum AppError {
     Forbidden,
     NotFound,
     Conflict(String),
+    InvalidWebhookSignature,
     Upstream(String),
     Internal(String),
 }
@@ -51,6 +52,11 @@ impl IntoResponse for AppError {
                 "the requested resource was not found".to_string(),
             ),
             Self::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
+            Self::InvalidWebhookSignature => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_webhook_signature",
+                "the GitHub webhook signature is invalid".to_string(),
+            ),
             Self::Upstream(detail) => {
                 error!(error = %detail, "upstream request failed");
                 (

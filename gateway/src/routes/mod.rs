@@ -3,10 +3,11 @@ pub mod auth;
 pub mod health;
 pub mod me;
 pub mod organizations;
+pub mod repositories;
 
 use axum::{
     Router,
-    routing::{delete, get},
+    routing::{delete, get, post, put},
 };
 use tower_http::trace::TraceLayer;
 
@@ -41,6 +42,20 @@ pub fn router(state: AppState) -> Router {
             get(api_tokens::list).post(api_tokens::create),
         )
         .route("/api-tokens/{token_id}", delete(api_tokens::revoke))
+        .route("/github/repositories", get(repositories::discover))
+        .route(
+            "/organizations/{organization_id}/repositories",
+            get(repositories::list),
+        )
+        .route(
+            "/organizations/{organization_id}/github-repositories/{github_repository_id}/tracking",
+            put(repositories::enable_tracking),
+        )
+        .route(
+            "/organizations/{organization_id}/repositories/{repository_id}/tracking",
+            delete(repositories::disable_tracking),
+        )
+        .route("/webhooks/github", post(crate::webhooks::receive))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

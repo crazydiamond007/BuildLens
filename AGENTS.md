@@ -9,13 +9,25 @@ shared Postgres.
 
 ---
 
-## Status: Phase 2 complete and verified. Phase 3 is next.
+## Status: Phase 3 implemented on its feature branch and pending owner review.
 
 Phase 1 delivered infrastructure and the full database schema. Phase 2 delivered
 GitHub OAuth, Redis sessions, API tokens, unified authentication, organization and
-membership APIs, and audit logging. **Phases 3-8 do not exist yet.** There is no
-repository sync client, no webhook ingestion, no RabbitMQ topology, no Java, no
-Python, and no frontend.
+membership APIs, and audit logging — committed on `feat/phase-2-auth` and verified
+end-to-end against the live stack: health, auth gating, the session and
+`Bearer` paths, organization authorization, audit writes, and the per-role grant
+boundary (the gateway can INSERT `organizations` but cannot INSERT `dora_metrics`
+or UPDATE `audit_logs`) all hold. The one path not exercised at runtime is the real
+GitHub OAuth round-trip, which needs a registered OAuth App's credentials.
+
+Phase 3 is implemented on `feat/phase-3-repository-sync`: repository discovery and
+opt-in tracking, automatic webhook registration, resumable branch/commit/PR sync,
+signed webhook persistence, and background processing for `push`, `pull_request`,
+and `pull_request_review`. The local stack verifies webhook security, idempotent
+processing, and branch/commit/PR writes. A real GitHub sync and hook registration
+still need valid OAuth credentials and a publicly reachable callback during owner
+review. **Phases 4-8 do not exist yet.** There is no workflow ingestion, RabbitMQ
+topology, Java, Python, or frontend.
 
 Phase list and the reasoning behind each Phase 1 decision: `docs/phases.md`.
 
@@ -31,8 +43,10 @@ directory with a README is the correct state for work that has not been approved
 not receive finished code. Where the Rust/Java/Python boundary or an event contract
 needs a judgement call, surface it rather than silently picking.
 
-**Keep changes scoped to the current phase.** Nothing is committed yet: `git init`
-has run, the tree is unstaged.
+**Keep changes scoped to the current phase.** Phases 1 and 2 are committed. Phase
+3 is in review. Work
+each phase on its own branch (`feat/phase-N-...`) and open it for review before it
+merges — the owner reviews, with Claude, before the next phase starts.
 
 ---
 
@@ -107,14 +121,17 @@ Postgres reports an unknown role that way.
 ## What exists
 
 ```
-gateway/          Rust + Axum. Health, OAuth, sessions, tokens, tenancy APIs.
-  src/main.rs       startup, tracing, graceful shutdown on SIGTERM
+gateway/          Rust + Axum. Auth, GitHub API, sync, and webhook ingestion.
+  src/main.rs       startup, tracing, graceful shutdown, webhook worker lifecycle
   src/config.rs     env parsing and validation; fails loudly at boot
   src/state.rs      Postgres, Redis, HTTP client, encryption, config
   src/auth.rs       session/API-token extractor and organization authorization
   src/sessions.rs   opaque Redis sessions and one-time OAuth state
-  src/github.rs     Phase 2 OAuth exchange and GitHub identity lookup only
-  src/routes/       health, auth, me, organizations/members, API tokens
+  src/github.rs     OAuth exchange and GitHub identity lookup
+  src/github_api.rs authenticated REST client, pagination, ETags, rate limits, hooks
+  src/repository_sync.rs resumable branches, commits, PRs, and review backfill
+  src/webhooks.rs   raw-body signature verification, persistence, background apply
+  src/routes/       auth/tenancy/tokens plus repository discovery and tracking
 infra/migrations/ 11 migrations, 27 tables. The source of truth for the schema.
 infra/postgres/   init/01-roles.sh: creates the 3 service roles (passwords can't
                   live in a migration, so role creation cannot either)
@@ -147,69 +164,118 @@ Gate on `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
 
 ## Phase 2: Auth & GitHub OAuth (Rust). Delivered.
 
-The GitHub OAuth flow, session issuance, API tokens, and the user / organization /
-membership endpoints are implemented. Migration 000011 contains the personal-org
-idempotency index and Phase 1 review corrections.
-
-### Implemented design decisions
-
-**Sessions are opaque, stored in Redis, delivered as an httpOnly cookie.** Not a
-stateless JWT. JWTs cannot be revoked, and "log out everywhere" and "kill a
-compromised session" are table stakes. JWTs may later be used service-to-service,
-where revocation does not matter.
-
-**GitHub OAuth tokens are encrypted by the gateway before they touch Postgres.**
-AES-GCM, key from `TOKEN_ENCRYPTION_KEY` (32 bytes, base64). `github_accounts`
-stores `bytea` ciphertext, so a database dump is not a credential leak.
-
-**API tokens are stored as a SHA-256 hash plus a lookup prefix.** `token_prefix` is
-kept in the clear so the UI can show `blq_a1b2…` and so lookup is an index hit;
-the token itself is unrecoverable. Never store the raw token.
-
-**Every user gets a personal organization at signup** (`organizations.kind =
-'personal'`) with an `owner` membership. Repositories always belong to exactly one
-organization, so authorization is a single rule everywhere: *is this user a member
-of the org that owns this row?* Organizations are BuildLens workspaces, **not**
-mirrors of GitHub orgs. We do not inherit GitHub's permission model, in which read
-access to code implies read access to metrics. Those are not the same permission.
-
-### Delivered scope
-
-- **OAuth flow.** `GET /auth/github/login` → redirect with a CSRF `state` stored in
-  Redis with a short TTL. `GET /auth/github/callback` → verify `state`, exchange the
-  code, fetch the GitHub user, upsert `users` + `github_accounts` (keyed on
-  `github_user_id`, which is stable across renames  the login is not), create the
-  personal org on first login, issue a session.
-- **Session middleware / extractor.** Accepts *either* a session cookie *or* a
-  `Bearer` API token, resolving both to the same authenticated principal.
-- **`GET /auth/logout`**  deletes the Redis session.
-- **User, org, membership endpoints.** `GET /me`; list/create orgs; list/add/remove
-  members with the `owner|admin|member|viewer` roles.
-- **API token endpoints.** Create (returns the raw token exactly once), list, revoke.
-- **Audit logging.** Write `audit_logs` for auth events, token creation/revocation,
-  membership changes. `actor_type` is `user | api_token | system | github`.
-
-### Config added
-
-`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI`,
-`TOKEN_ENCRYPTION_KEY`, `SESSION_TTL_SECONDS`. They are validated by `Config`,
-documented in `.env.example`, passed by the compose `gateway` service, and retained
-in `AppState` for the request handlers.
-
-### Still deliberately absent
-
-The GitHub API client for repository sync (Phase 3), webhook receivers (Phase 3),
-and any RabbitMQ publishing or outbox relay (Phase 4).
+The OAuth flow, opaque Redis sessions (httpOnly cookie, revocable — not a JWT),
+AES-GCM-encrypted GitHub tokens, hashed API tokens with a clear lookup prefix, the
+`owner|admin|member|viewer` org model with a personal org per user, and audit
+logging are all in. The API surface is in `README.md`; the load-bearing decisions
+are summarised under "What exists" and enforced by the invariants above. Config
+added: `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI`,
+`TOKEN_ENCRYPTION_KEY`, `SESSION_TTL_SECONDS`.
 
 ---
 
-## Open decisions the owner still needs to make
+## Phase 3: Repository sync & webhooks (Rust). Implemented, pending review.
 
-**Ingest `pull_request_review` events?** `pull_requests.first_review_at` exists but is
-never populated. Review latency is the most interesting slice of lead time. This
-widens Phase 3's webhook scope, so it is cheaper to decide before Phase 3 than after.
+Phase 3 is where facts start flowing out of GitHub. Phase 2 left us a logged-in
+user with an encrypted OAuth token; Phase 3 uses it to populate the repository side
+of the schema — `repositories`, `repository_sync_state`, `branches`, `commits`,
+`pull_requests` — and stands up the webhook receiver that keeps them current. It is
+**Rust-only**. No Java, no Python, no RabbitMQ yet.
 
-**Who parses JUnit XML into `test_results`?** Currently granted to the gateway, on the
-reasoning that parsing test reports means downloading an artifact from GitHub and the
-gateway holds the credentials. If Phase 5 would rather Java did it, that is a one-line
-change in `000010_grants.up.sql`.
+### Decisions locked by the owner
+
+**GitHub is called as the user, with their decrypted OAuth token** — not a GitHub
+App installation token. The Phase 2 scopes (`read:user user:email repo read:org`)
+already cover reading repos and managing repo hooks. A GitHub App would give higher
+rate limits and per-install webhooks, at the cost of a much larger setup; for a
+portfolio project the user-token path is the pragmatic call. **Boundary flag:** if
+you ever want org-wide install without each user having admin, that is the App
+route — decide now, because it changes the webhook story below.
+
+**Conditional requests and rate-limit handling are mandatory, not polish.** That is
+the entire reason `repository_sync_state` carries an `etag` and a `cursor` per
+resource. Send `If-None-Match`; a `304` costs no rate budget and means "nothing
+changed". Honour `X-RateLimit-Remaining` / `Reset` and back off on secondary limits.
+A sync that re-walks full history every run will exhaust the hourly limit.
+
+**Sync is opt-in per repo.** `repositories.tracking_enabled` exists for this.
+Listing a user's repos is cheap; syncing every repo they can see is rude to GitHub
+and useless on the dashboard. The user picks which repos to track; only tracked
+repos sync and only tracked repos have their webhooks processed.
+
+**Verify the webhook signature before parsing a single byte.** HMAC-SHA256 over the
+**raw** request body with the shared secret, constant-time compare against
+`X-Hub-Signature-256`. But record the delivery either way:
+`webhook_deliveries.signature_valid` is stored, not enforced by the table, because a
+run of bad signatures is a security signal and deleting it erases the evidence.
+
+**Webhook idempotency is the `webhook_deliveries.github_delivery_id` UNIQUE
+constraint.** Insert the delivery first; a replayed `X-GitHub-Delivery` collides and
+is dropped instead of double-counting. The table doubles as a replay log — the fix
+for a processing bug is to correct the code and re-drive the stored payloads, not to
+beg GitHub to resend.
+
+**Receive fast, process off the hot path.** The handler's job is verify → persist
+the raw delivery → return `2xx` quickly so GitHub doesn't time out and retry. Turning
+a delivery into `branches` / `commits` / `pull_requests` rows happens separately;
+`webhook_deliveries_pending_idx` is literally "the work queue for the webhook
+processor". A single-process background task draining that queue is fine for Phase 3.
+
+**Boundary flag — the outbox stays empty in Phase 3.** The gateway *has* the grant
+to write `event_outbox`, but the relay that publishes it is Phase 4. Do not start
+writing outbox rows now; they would just pile up unpublished. Phase 3 gets facts
+into Postgres and no further. Event contracts and publishing are Phase 4's job.
+
+### Delivered scope
+
+- **A GitHub REST client** (extend `src/github.rs` or add a module): authenticated
+  as the user via the decrypted token, with pagination, `ETag` conditional requests,
+  and rate-limit handling. Typed response structs, same style as the Phase 2 OAuth
+  types.
+- **Repo discovery + tracking.** List the user's GitHub repos (joined against what
+  is already tracked); a mutation to start/stop tracking a repo, which writes the
+  `repositories` row into the caller's chosen organization and flips
+  `tracking_enabled`. Tracking is session-only and requires the BuildLens `admin`
+  role plus GitHub repository admin permission.
+- **Initial sync** for a tracked repo: backfill `branches`, `commits`,
+  `pull_requests`, paginated and resumable via the `repository_sync_state`
+  cursors/etags, updating `sync_status` / `last_synced_at` / `last_error` as it goes.
+- **Webhook receiver:** `POST /webhooks/github` — verify signature, dedupe on
+  `github_delivery_id`, persist to `webhook_deliveries`, return `2xx`.
+- **Webhook processor:** drain pending deliveries and apply `push`,
+  `pull_request`, and `pull_request_review` events to branches, commits, PRs, and
+  `first_review_at`. Resolve the soft `repository_id` from `github_repo_id`; a
+  webhook for an untracked or not-yet-synced repo is recorded and ignored.
+- **Audit + authorization.** Reads gated by org membership; tracking changes audited
+  (`repository.tracking_enabled` / `.disabled`) with the existing `audit::write`.
+
+### Config added
+
+- `GITHUB_WEBHOOK_SECRET` — the HMAC secret for signature verification.
+- `GITHUB_WEBHOOK_URL` — the public callback registered on tracked repositories.
+- `GITHUB_API_BASE_URL` — defaults to `https://api.github.com` and can target a
+  test server.
+
+### Deliberately absent (do NOT build in Phase 3)
+
+`workflow_runs` / `jobs` / `steps` ingestion and build-log storage to MinIO
+(Phase 4). Deployment ingestion (depends on workflow runs — Phase 4+). RabbitMQ
+publishing and the outbox relay (Phase 4). DORA / scoring / flaky-test analytics
+(Phase 5, Java). Anything Python or frontend.
+
+---
+
+## Decisions recorded during Phase 3
+
+**`pull_request_review` events are included.** Initial sync backfills the first
+review timestamp and webhook processing keeps it current.
+
+**Webhooks are registered automatically.** Tracking requires a BuildLens `admin`
+and GitHub repository admin permission. Registration failures are returned to the
+caller; the repository is not marked tracked when its hook is absent.
+
+**Who parses JUnit XML into `test_results`?** (Phase 5 concern, noted here so it is
+not forgotten.) Currently granted to the gateway, on the reasoning that parsing test
+reports means downloading an artifact from GitHub and the gateway holds the
+credentials. If Phase 5 would rather Java did it, that is a one-line change in
+`000010_grants.up.sql`.

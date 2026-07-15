@@ -1,6 +1,7 @@
 use std::{env, fmt, net::SocketAddr, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use reqwest::Url;
 
 /// Everything the gateway needs from its environment.
 ///
@@ -24,6 +25,9 @@ pub struct Config {
     pub github_client_id: String,
     pub github_client_secret: String,
     pub github_redirect_uri: String,
+    pub github_api_base_url: Url,
+    pub github_webhook_url: Url,
+    pub github_webhook_secret: String,
     pub token_encryption_key: [u8; 32],
     pub session_ttl: Duration,
 }
@@ -85,6 +89,24 @@ impl Config {
             message: e.to_string(),
         })?;
 
+        let mut github_api_base_url = optional("GITHUB_API_BASE_URL")
+            .unwrap_or_else(|| "https://api.github.com/".to_string());
+        if !github_api_base_url.ends_with('/') {
+            github_api_base_url.push('/');
+        }
+        let github_api_base_url = parse_url("GITHUB_API_BASE_URL", &github_api_base_url)?;
+        let github_webhook_url = parse_url(
+            "GITHUB_WEBHOOK_URL",
+            required("GITHUB_WEBHOOK_URL")?.as_str(),
+        )?;
+        let github_webhook_secret = required("GITHUB_WEBHOOK_SECRET")?;
+        if github_webhook_secret.len() < 32 {
+            return Err(ConfigError::Invalid {
+                key: "GITHUB_WEBHOOK_SECRET",
+                message: "must be at least 32 characters".to_string(),
+            });
+        }
+
         Ok(Self {
             environment: parse_optional("ENVIRONMENT")?.unwrap_or(Environment::Development),
             bind_addr,
@@ -95,10 +117,27 @@ impl Config {
             github_client_id: required("GITHUB_CLIENT_ID")?,
             github_client_secret: required("GITHUB_CLIENT_SECRET")?,
             github_redirect_uri,
+            github_api_base_url,
+            github_webhook_url,
+            github_webhook_secret,
             token_encryption_key: encryption_key()?,
             session_ttl: Duration::from_secs(session_ttl_seconds),
         })
     }
+}
+
+fn parse_url(key: &'static str, value: &str) -> Result<Url, ConfigError> {
+    let url = Url::parse(value).map_err(|e| ConfigError::Invalid {
+        key,
+        message: e.to_string(),
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(ConfigError::Invalid {
+            key,
+            message: "must be an absolute http or https URL".to_string(),
+        });
+    }
+    Ok(url)
 }
 
 fn encryption_key() -> Result<[u8; 32], ConfigError> {

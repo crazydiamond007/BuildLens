@@ -6,8 +6,8 @@ Each phase ships something runnable and is reviewed before the next starts.
 | ----- | ----- | ------ |
 | 1 | Foundation: repo layout, compose stack, schema, gateway skeleton | **done** |
 | 2 | Auth: GitHub OAuth, sessions, API tokens, user/org/membership endpoints | **done** |
-| 3 | Repository sync: GitHub client, repo/branch/commit sync, webhook receiver | next |
-| 4 | Workflow ingestion: runs/jobs/steps, log storage to S3, event contracts | |
+| 3 | Repository sync: GitHub client, repo/branch/commit sync, webhook receiver | **in review** |
+| 4 | Workflow ingestion: runs/jobs/steps, log storage to S3, event contracts | next after review |
 | 5 | Java analytics: DORA, flaky tests, scoring, scheduled recomputation | |
 | 6 | Python AI worker: build summaries and recommendations | |
 | 7 | Next.js dashboard | |

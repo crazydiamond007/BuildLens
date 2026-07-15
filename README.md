@@ -1,7 +1,7 @@
 # BuildLens
 
 [![CI](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml/badge.svg)](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml)
-[![Phase](https://img.shields.io/badge/phase-2%20complete-2ea44f.svg)](#status)
+[![Phase](https://img.shields.io/badge/phase-3%20in%20review-d29922.svg)](#status)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-000000.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1.svg?logo=postgresql&logoColor=white)](#requires)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?logo=docker&logoColor=white)](#quick-start)
@@ -22,9 +22,11 @@ Next.js ──► Rust gateway ──► RabbitMQ ──┬──► Java analyt
 
 ## Status
 
-**Phase 2: auth and GitHub OAuth, complete.** The gateway provides GitHub OAuth,
-Redis-backed sessions, hashed API tokens, and user/organization/membership APIs.
-Phase 3 (repository sync and webhooks) is next.
+**Phase 3: repository sync and webhooks, in review.** The gateway discovers a
+user's GitHub repositories, tracks selected repositories, performs resumable
+initial synchronization, and processes signed `push`, `pull_request`, and
+`pull_request_review` webhooks. Phase 2 authentication remains the access-control
+foundation. Phase 4 does not exist yet.
 
 `AGENTS.md` is the handoff: current state, the invariants not to break, and the
 delivered Phase 2 design. `docs/phases.md` is the decision log.
@@ -33,8 +35,8 @@ delivered Phase 2 design. `docs/phases.md` is the decision log.
 
 ```bash
 make env      # create .env from .env.example
-# Fill in the GitHub OAuth values and replace TOKEN_ENCRYPTION_KEY before using
-# anything beyond local development.
+# Fill in the GitHub OAuth and webhook values and replace TOKEN_ENCRYPTION_KEY
+# before using anything beyond local development.
 make up       # postgres, redis, rabbitmq, minio + run migrations
 make dev      # gateway on the host, against the dockerised stack
 
@@ -62,11 +64,33 @@ Protected routes accept either the `buildlens_session` httpOnly cookie or
 `Authorization: Bearer blq_...`. Account and membership mutations require the
 session cookie.
 
+## Phase 3 API
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET | `/github/repositories` | Discover visible GitHub repositories and their tracking state |
+| GET | `/organizations/{id}/repositories` | List repositories in a BuildLens organization |
+| PUT | `/organizations/{id}/github-repositories/{github_repo_id}/tracking` | Register the webhook, enable tracking, and queue initial sync |
+| DELETE | `/organizations/{id}/repositories/{repository_id}/tracking` | Remove the webhook and stop tracking |
+| POST | `/webhooks/github` | Verify, deduplicate, and persist GitHub deliveries |
+
+Tracking mutations require a session and at least the BuildLens `admin` role.
+GitHub repository admin permission is also required because BuildLens registers
+the webhook automatically. Initial synchronization checkpoints each GitHub page
+in `repository_sync_state`; repeating the tracking `PUT` safely resumes a failed
+sync. Repository discovery is session-only because it exposes repositories that
+have not entered a BuildLens authorization boundary. Webhook reception responds
+before a background task applies deliveries.
+
+Set `GITHUB_WEBHOOK_URL` to a public HTTPS endpoint in real deployments. For local
+development, use a webhook forwarding tunnel. `GITHUB_API_BASE_URL` defaults to
+`https://api.github.com` and can point at a test server.
+
 ## Layout
 
 | Path         | What                                                       |
 | ------------ | ---------------------------------------------------------- |
-| `gateway/`   | Rust + Axum. Auth, GitHub OAuth, tenancy and API tokens.    |
+| `gateway/`   | Rust + Axum. Auth, GitHub API, repository sync and webhooks. |
 | `analytics/` | Java + Spring Boot. DORA, scoring, flaky tests. *Phase 5.*  |
 | `ai-worker/` | Python + FastAPI. Summaries, recommendations. *Phase 6.*    |
 | `frontend/`  | Next.js dashboard. *Phase 7.*                              |
