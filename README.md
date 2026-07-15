@@ -1,7 +1,7 @@
 # BuildLens
 
 [![CI](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml/badge.svg)](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml)
-[![Phase](https://img.shields.io/badge/phase-4%20in%20review-d29922.svg)](#status)
+[![Phase](https://img.shields.io/badge/phase-5%20in%20review-d29922.svg)](#status)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-000000.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1.svg?logo=postgresql&logoColor=white)](#requires)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?logo=docker&logoColor=white)](#quick-start)
@@ -22,14 +22,12 @@ Next.js ──► Rust gateway ──► RabbitMQ ──┬──► Java analyt
 
 ## Status
 
-**Phase 4: workflow ingestion, log storage, and the event relay, in review.** The
-gateway ingests GitHub Actions `workflow_run` / `workflow_job` events (and backfills
-them over REST) into per-attempt `workflow_runs` / `workflow_jobs` / `workflow_steps`
-rows, infers production deployments from successful default-branch runs, stores run
-logs to MinIO, and — the headline — runs the transactional-outbox relay that
-publishes `workflow_run.completed` and `deployment.recorded` to RabbitMQ. The event
-contract every consumer binds to lives in `contracts/`. Phases 1–3 (auth, tenancy,
-repository sync) are merged. Phase 5 (Java analytics) does not exist yet.
+**Phase 5: Java analytics, implemented and pending owner review.** The Spring Boot
+consumer validates (but never migrates) the shared schema, owns a durable RabbitMQ
+queue, and idempotently computes DORA rollups, build/repository scores, and flaky
+tests into the four tables granted to `buildlens_analytics`. The gateway also now
+downloads bounded workflow artifacts and parses JUnit XML into `test_results`,
+keeping GitHub credentials on the Rust side of the boundary. Phases 1–4 are merged.
 
 `AGENTS.md` is the handoff: current state, the invariants not to break, and the
 delivered Phase 2 design. `docs/phases.md` is the decision log.
@@ -42,9 +40,11 @@ make env      # create .env from .env.example
 # before using anything beyond local development.
 make up       # postgres, redis, rabbitmq, minio + run migrations
 make dev      # gateway on the host, against the dockerised stack
+make analytics-dev # analytics on the host (run in another terminal)
 
 curl localhost:8080/health         # liveness: is the process alive?
 curl localhost:8080/health/ready   # readiness: can it reach its dependencies?
+curl localhost:8081/actuator/health # analytics + database/RabbitMQ health
 ```
 
 `make help` lists the rest.
@@ -59,6 +59,7 @@ MinIO. Run them in order.
 
 - Docker and Docker Compose.
 - Rust 1.94+ (the gateway runs on the host via `make dev`).
+- Java 25+ and Maven 3.6.3+ (analytics runs on the host via `make analytics-dev`).
 - Node.js (for the webhook tunnel in step 3), or any equivalent tunnel.
 - A **GitHub OAuth App** (Settings → Developer settings → OAuth Apps). Set its
   callback URL to `http://localhost:8080/auth/github/callback`. Note the client
@@ -122,6 +123,13 @@ curl localhost:8080/health         # liveness
 curl localhost:8080/health/ready   # readiness: postgres + redis reachable
 ```
 
+In another terminal, start analytics and verify its dependency-aware health:
+
+```bash
+make analytics-dev
+curl localhost:8081/actuator/health
+```
+
 ### 5. Log in with GitHub
 
 Open **http://localhost:8080/auth/github/login** in a browser and approve. This
@@ -167,6 +175,10 @@ SELECT status, event_type FROM event_outbox        -- flips to 'published'
   ORDER BY created_at DESC LIMIT 5;
 SELECT object_key, size_bytes FROM build_logs      -- run logs captured
   ORDER BY created_at DESC LIMIT 5;
+SELECT overall_score, grade FROM repository_scores
+  ORDER BY computed_at DESC LIMIT 5;
+SELECT granularity, deployment_count, lead_time_p50_seconds
+  FROM dora_metrics ORDER BY period_start DESC LIMIT 10;
 ```
 
 To watch the messages on the bus, bind a throwaway queue to the events exchange
@@ -239,7 +251,7 @@ development, use a webhook forwarding tunnel. `GITHUB_API_BASE_URL` defaults to
 | Path         | What                                                       |
 | ------------ | ---------------------------------------------------------- |
 | `gateway/`   | Rust + Axum. Auth, GitHub API, repository sync and webhooks. |
-| `analytics/` | Java + Spring Boot. DORA, scoring, flaky tests. *Phase 5.*  |
+| `analytics/` | Java + Spring Boot. DORA, scoring, flaky-test analytics.    |
 | `ai-worker/` | Python + FastAPI. Summaries, recommendations. *Phase 6.*    |
 | `frontend/`  | Next.js dashboard. *Phase 7.*                              |
 | `contracts/` | Shared RabbitMQ event envelope, per-event examples, topology. |
@@ -269,5 +281,5 @@ idempotent. Duplicates are survivable; silent loss is not.
 
 ## Requires
 
-Docker, Docker Compose, and Rust 1.94+ to run the gateway on the host. Postgres
-18 (the schema uses native `uuidv7()`); the compose file pins it.
+Docker, Docker Compose, Rust 1.94+, Java 25+, and Maven 3.6.3+. Postgres 18 is
+required because the schema uses native `uuidv7()`; the compose file pins it.

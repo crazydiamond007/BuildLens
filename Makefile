@@ -39,9 +39,9 @@ up: ## Start infrastructure (postgres, redis, rabbitmq, minio) and run migration
 	@echo "  minio      localhost:$(MINIO_CONSOLE_PORT) (console)"
 
 .PHONY: up-all
-up-all: ## Start infrastructure and the gateway container
+up-all: ## Start infrastructure, gateway, and analytics containers
 	$(MAKE) up
-	$(COMPOSE) --profile app up -d --build --wait --no-deps gateway
+	$(COMPOSE) --profile app up -d --build --wait --no-deps gateway analytics
 
 .PHONY: down
 down: ## Stop everything (volumes preserved)
@@ -113,6 +113,22 @@ lint: ## Clippy, warnings as errors
 .PHONY: test
 test: ## Run gateway tests
 	cd gateway && cargo test
+
+## ---------------------------------------------------------------------------
+## Analytics (Java / Spring Boot)
+## ---------------------------------------------------------------------------
+
+.PHONY: analytics-dev
+analytics-dev: ## Run analytics on the host against dockerised infrastructure
+	cd analytics && mvn spring-boot:run
+
+.PHONY: analytics-check
+analytics-check: ## Compile analytics with warnings denied
+	cd analytics && mvn -DskipTests package
+
+.PHONY: analytics-test
+analytics-test: ## Run analytics unit tests
+	cd analytics && mvn test
 
 .PHONY: help
 help:

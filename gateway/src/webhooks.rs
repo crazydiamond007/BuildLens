@@ -23,6 +23,7 @@ use crate::{
     github_api::{
         self, GitHubApi, GitHubJob, GitHubPullRequest, GitHubWorkflow, GitHubWorkflowRun,
     },
+    junit::{self, JunitCapture},
     repository_sync::upsert_pull_request,
     state::AppState,
     workflow_ingest,
@@ -261,8 +262,19 @@ async fn apply_delivery(state: &AppState, delivery: &Delivery) -> Result<(), App
     if let Some(capture) = outcome.log_capture {
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(error) = store_run_logs(&state, capture).await {
+            if let Err(error) = store_run_logs(&state, capture.clone()).await {
                 warn!(error = ?error, "workflow log capture failed");
+            }
+            let junit_capture = JunitCapture {
+                repository_id: capture.repository_id,
+                workflow_run_id: capture.workflow_run_id,
+                owner: capture.owner,
+                name: capture.name,
+                github_run_id: capture.github_run_id,
+                executed_at: capture.executed_at,
+            };
+            if let Err(error) = junit::capture_run_tests(&state, junit_capture).await {
+                warn!(error = ?error, "JUnit artifact capture failed");
             }
         });
     }
@@ -321,6 +333,7 @@ impl Outcome {
     }
 }
 
+#[derive(Clone)]
 struct LogCapture {
     repository_id: Uuid,
     workflow_run_id: Uuid,
@@ -328,6 +341,7 @@ struct LogCapture {
     name: String,
     github_run_id: i64,
     run_attempt: i32,
+    executed_at: DateTime<Utc>,
 }
 
 async fn apply_workflow_run(
@@ -375,6 +389,7 @@ async fn apply_workflow_run(
             name: context.name.clone(),
             github_run_id: run.id,
             run_attempt: run.run_attempt,
+            executed_at: run.updated_at.unwrap_or_else(Utc::now),
         })
     } else {
         None

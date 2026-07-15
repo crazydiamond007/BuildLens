@@ -1,0 +1,49 @@
+server:
+  port: ${ANALYTICS_PORT:8081}
+
+spring:
+  application:
+    name: buildlens-analytics
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+  datasource:
+    url: ${ANALYTICS_DATABASE_URL:jdbc:postgresql://localhost:5433/buildlens}
+    username: buildlens_analytics
+    password: ${ANALYTICS_DB_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: false
+  liquibase:
+    enabled: false
+  rabbitmq:
+    addresses: ${RABBITMQ_URL:amqp://buildlens:buildlens_dev_password@localhost:5672/buildlens}
+    listener:
+      simple:
+        acknowledge-mode: manual
+        default-requeue-rejected: false
+        prefetch: 8
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+
+analytics:
+  queue: analytics.workflow_runs
+  recompute:
+    window-days: 30
+    lookback-days: 90
+    cron: "0 15 * * * *"
