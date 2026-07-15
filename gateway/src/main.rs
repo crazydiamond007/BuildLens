@@ -4,15 +4,18 @@ mod config;
 mod crypto;
 mod error;
 mod github;
+mod github_api;
+mod repository_sync;
 mod routes;
 mod sessions;
 mod state;
+mod webhooks;
 
 use std::process::ExitCode;
 
 use config::{Config, Environment};
 use state::AppState;
-use tokio::{net::TcpListener, signal};
+use tokio::{net::TcpListener, signal, sync::watch};
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -51,15 +54,24 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState::connect(config).await?;
     let listener = TcpListener::bind(bind_addr).await?;
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let processor = tokio::spawn(webhooks::run_processor(state.clone(), shutdown_receiver));
 
     info!(%bind_addr, %environment, "buildlens gateway listening");
 
-    axum::serve(
+    let signal_sender = shutdown_sender.clone();
+    let server_result = axum::serve(
         listener,
         routes::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        let _ = signal_sender.send(true);
+    })
+    .await;
+    let _ = shutdown_sender.send(true);
+    processor.await?;
+    server_result?;
 
     info!("shutdown complete");
     Ok(())

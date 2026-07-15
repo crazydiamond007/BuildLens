@@ -102,6 +102,66 @@ pub fn sha256_hex(value: &str) -> String {
         .collect()
 }
 
+pub fn verify_github_signature(secret: &str, body: &[u8], signature: &str) -> bool {
+    let Some(hex) = signature.strip_prefix("sha256=") else {
+        return false;
+    };
+    if hex.len() != 64 {
+        return false;
+    }
+    let mut supplied = [0_u8; 32];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let Some(high) = from_hex(pair[0]) else {
+            return false;
+        };
+        let Some(low) = from_hex(pair[1]) else {
+            return false;
+        };
+        supplied[index] = (high << 4) | low;
+    }
+    let expected = hmac_sha256(secret.as_bytes(), body);
+    expected
+        .iter()
+        .zip(supplied)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn hmac_sha256(key: &[u8], body: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut normalized = [0_u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        normalized[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        normalized[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_pad = [0x36_u8; BLOCK_SIZE];
+    let mut outer_pad = [0x5c_u8; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        inner_pad[index] ^= normalized[index];
+        outer_pad[index] ^= normalized[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(body);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+fn from_hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +185,17 @@ mod tests {
         assert!(first.starts_with("blq_"));
         assert_ne!(first, second);
         assert_eq!(sha256(&first).len(), 32);
+    }
+
+    #[test]
+    fn verifies_github_hmac_signature_in_constant_time() {
+        let signature = "sha256=f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8";
+        assert!(verify_github_signature(
+            "key",
+            b"The quick brown fox jumps over the lazy dog",
+            signature
+        ));
+        assert!(!verify_github_signature("key", b"changed", signature));
+        assert!(!verify_github_signature("key", b"body", "sha256=invalid"));
     }
 }
