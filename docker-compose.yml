@@ -1,0 +1,165 @@
+# BuildLens local development stack.
+#
+#   make up      infrastructure only (postgres, redis, rabbitmq, minio) + migrations
+#   make up-all  the above plus the gateway container (profile: app)
+#   make dev     infrastructure in docker, gateway on the host via cargo run
+#
+# Every dependency has a healthcheck, so `depends_on: condition: service_healthy`
+# actually means "ready", not merely "process started". The migrator runs to
+# completion before any application service is allowed to start.
+
+name: buildlens
+
+services:
+  postgres:
+    # 18, not 16: the schema uses the native uuidv7() added in 18. See
+    # infra/migrations/000001_init.up.sql.
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Consumed by init/01-roles.sh, which runs once on an empty data volume.
+      GATEWAY_DB_PASSWORD: ${GATEWAY_DB_PASSWORD}
+      ANALYTICS_DB_PASSWORD: ${ANALYTICS_DB_PASSWORD}
+      AI_DB_PASSWORD: ${AI_DB_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      # Mounted at /var/lib/postgresql, NOT /var/lib/postgresql/data. Postgres 18
+      # keeps its data in a major-version subdirectory (.../18/docker) so that
+      # pg_upgrade can see both versions across one mount point. The image
+      # refuses to start if it finds a volume at the old path.
+      - postgres_data:/var/lib/postgresql
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # Runs the SQL in infra/migrations to completion, then exits 0. This is the
+  # only thing in the system permitted to change the schema. See AGENTS.md.
+  migrator:
+    image: migrate/migrate:v4.17.1
+    volumes:
+      - ./infra/migrations:/migrations:ro
+    command:
+      - -path=/migrations
+      - -database=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST}
+    ports:
+      - "${RABBITMQ_PORT}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Creates the buckets, then exits. It is idempotent and safe to re-run.
+  minio-init:
+    image: minio/mc:latest
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_LOGS_BUCKET: ${MINIO_LOGS_BUCKET}
+      MINIO_ARTIFACTS_BUCKET: ${MINIO_ARTIFACTS_BUCKET}
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+    volumes:
+      - ./infra/minio/bootstrap.sh:/bootstrap.sh:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: on-failure
+
+  gateway:
+    profiles: ["app"]
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT}
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 8080
+      RUST_LOG: ${RUST_LOG}
+      DATABASE_URL: postgres://buildlens_gateway:${GATEWAY_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS}
+      DATABASE_CONNECT_TIMEOUT_SECONDS: ${DATABASE_CONNECT_TIMEOUT_SECONDS}
+      REDIS_URL: redis://redis:6379
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+      GITHUB_REDIRECT_URI: ${GITHUB_REDIRECT_URI}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS}
+    ports:
+      - "${GATEWAY_PORT}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  minio_data:
