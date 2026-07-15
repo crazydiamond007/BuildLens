@@ -465,3 +465,94 @@ The Python AI worker (Phase 6) and the Next.js frontend (Phase 7). No new gatewa
 features beyond the agreed JUnit artifact seam. If analytics needs another fact
 that is not ingested yet, flag it back to a gateway change; do not synthesise it.
 No Phase 5 schema migration was needed.
+
+---
+
+## Phase 6: AI build summaries & recommendations (Python). Next — brief.
+
+Phase 6 is the **first Python service and the third consumer**. Rust produced the
+facts, Java derived the numbers; Phase 6 *explains* them. It consumes the same
+events, reads facts from Postgres and build logs from MinIO, calls an LLM, and
+writes `ai_reports` and `ai_recommendations`. FastAPI is the shell (health +
+manual re-trigger); the RabbitMQ consumer is the substance.
+
+### Decisions to lock in
+
+**It owns only `ai_reports` and `ai_recommendations` — the grants enforce it.** The
+service connects as `buildlens_ai` and can write exactly those two tables
+(`000010_grants.up.sql`); it reads everything else. Invariant #2. Python **never
+migrates** (invariant #1) — a new table (e.g. a processed-events ledger) goes
+through `make migrate-create` **with a grant**, not a service-side migration.
+
+**Idempotency is a *paid* concern here — a duplicate event is a duplicate LLM
+bill.** The `ai_reports (workflow_run_id, kind)` partial UNIQUE is the guard:
+`INSERT ... ON CONFLICT DO NOTHING` a `pending` row *first*, and only call the
+model if you won the insert. Never regenerate on a replay. Delivery is
+at-least-once (invariant #5); dedupe on the envelope `id` too.
+
+**Consumer owns its topology.** Declare a durable queue (e.g. `ai.reports`) bound
+to `buildlens.events` on `workflow_run.*` / `deployment.*`, dead-lettered to
+`buildlens.events.dlx`. The gateway declares only the exchanges. Ack only after the
+report row is committed (or the message is dead-lettered).
+
+**Output must be grounded and checkable.** `ai_reports.content` (jsonb) and
+`ai_recommendations.evidence` (jsonb) carry the cited job/step ids, failing
+`test_key`s, and log line ranges the model looked at. Use **structured outputs**
+(`output_config={"format": {"type": "json_schema", "schema": ...}}`, or
+`client.messages.parse(...)` with a Pydantic model) so the model returns exactly
+the JSON these columns expect — not prose you then regex.
+
+**Provenance and unit economics are columns, so populate them every call.**
+`ai_reports` has `model`, `prompt_version`, `input_tokens`, `output_tokens`,
+`cost_usd`, `latency_ms`. Read `response.usage` for the token counts; count ahead
+of time with `client.messages.count_tokens(...)`, **never tiktoken** (it undercounts
+Claude). A prompt change stays attributable, and cost stays visible.
+
+**Model choice is the owner's call — boundary flag.** Use the official Anthropic
+Python SDK (`pip install anthropic`; `anthropic.Anthropic()`;
+`client.messages.create(...)`), `ANTHROPIC_API_KEY` from env. Suggested tiering, to
+confirm: `claude-opus-4-8` (default; $5/$25 per Mtok) for `failure_analysis` with
+adaptive thinking (`thinking={"type": "adaptive"}`); a cheaper/faster tier —
+`claude-haiku-4-5` ($1/$5) or `claude-sonnet-5` ($3/$15) — for per-build
+`build_summary`. Prompt-cache the shared system prompt and the large log context
+(`cache_control`). Cap `max_tokens`. **The tier per report kind and a monthly cost
+ceiling are decisions to settle before building.**
+
+**Data-egress flag — this is the first outward data flow to a third party.** Build
+logs and code snippets leave the box for the Anthropic API. Confirm that is
+acceptable for the tracked repositories, decide what gets redacted, and note the
+API's data-retention terms. This is the owner's call, not Codex's.
+
+### Scope to build
+
+- **A Python service in `ai-worker/`** (FastAPI for `/health` + a manual
+  re-trigger endpoint; the core is a RabbitMQ consumer — `aio-pika` or `pika`),
+  connecting as `buildlens_ai`, added to `docker-compose.yml` under the `app`
+  profile with `depends_on` postgres/rabbitmq healthy + migrator completed.
+- **`failure_analysis`** on a failed `workflow_run.completed`: pull the run, its
+  jobs/steps, and failing `test_results` from Postgres (the gateway now populates
+  them) + the run's log zip from MinIO, call the model, write one `ai_reports` row
+  (`kind = failure_analysis`) and any `ai_recommendations`.
+- **`build_summary`** (optional, cheap tier) on success.
+- **Scheduled `weekly_digest` / `repo_health`** per repo, reading the
+  `dora_metrics` / `flaky_tests` / `*_scores` that Phase 5 writes.
+- Idempotent on `(workflow_run_id, kind)` and the envelope id; poison/oversized
+  messages dead-lettered.
+
+### Config to add
+
+`ANTHROPIC_API_KEY`, the model-tier settings, `AI_DB_PASSWORD` + the
+`buildlens_ai` `DATABASE_URL`, `RABBITMQ_URL`, and the S3/MinIO credentials (to
+read the log objects). All required at boot.
+
+### Open decisions (resolve before/early in Phase 6)
+
+- **Model tier per report kind + a monthly cost cap** (owner call).
+- **Does `build_summary` run on every run or only failures?** — pure cost.
+- **Data egress / redaction policy** for logs and code sent to the API (owner call).
+
+### Deliberately absent (do NOT build in Phase 6)
+
+The Next.js frontend (Phase 7) and hardening (Phase 8). No gateway or analytics
+changes — if the worker needs a fact that is not ingested or derived yet, flag it
+back, do not synthesise it.
