@@ -81,6 +81,32 @@ jobs:
       - name: Compile and run tests with warnings denied
         run: mvn --batch-mode test package
 
+  ai-worker:
+    name: AI Worker / Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ai-worker
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install UV and Python 3.13
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          working-directory: ai-worker
+          enable-cache: true
+
+      - name: Check lock file, formatting, lint, and tests
+        run: |
+          uv sync --frozen
+          uv run --frozen ruff format --check .
+          uv run --frozen ruff check .
+          uv run --frozen pytest
+
   migrations:
     name: Database / Migrations
     runs-on: ubuntu-latest
@@ -118,7 +144,7 @@ jobs:
       - name: Verify schema version
         run: |
           version="$(docker compose exec -T postgres psql -U buildlens -d buildlens -Atc 'SELECT version FROM schema_migrations')"
-          test "$version" = "11"
+          test "$version" = "12"
 
       - name: Stop migration services
         if: always()
@@ -146,17 +172,19 @@ jobs:
         run: docker compose run --rm minio-init
 
       - name: Build and start application images
-        run: docker compose --profile app up -d --build --wait --no-deps gateway analytics
+        run: docker compose --profile app up -d --build --wait --no-deps gateway analytics ai-worker
 
       - name: Check liveness and readiness
         run: |
           curl --fail --silent --show-error http://localhost:8080/health
           curl --fail --silent --show-error http://localhost:8080/health/ready
           curl --fail --silent --show-error http://localhost:8081/actuator/health
+          curl --fail --silent --show-error http://localhost:8082/health
+          curl --fail --silent --show-error http://localhost:8082/health/ready
 
       - name: Show application logs after failure
         if: failure()
-        run: docker compose --profile app logs gateway analytics
+        run: docker compose --profile app logs gateway analytics ai-worker
 
       - name: Stop application services
         if: always()

@@ -61,7 +61,7 @@ impl OutboxEvent {
 
 /// Writes the outbox row inside the caller's transaction. The envelope id is a
 /// UUIDv7 generated here (not left to the column default) so it can be embedded
-/// in the stored payload and reused by the relay as the RabbitMQ `message_id` —
+/// in the stored payload and reused by the relay as the RabbitMQ `message_id` -
 /// the same value the consumer dedupes on. Returns that id.
 pub async fn enqueue(
     transaction: &mut Transaction<'_, Postgres>,

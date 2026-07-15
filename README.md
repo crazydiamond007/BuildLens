@@ -1,10 +1,12 @@
 # BuildLens
 
 [![CI](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml/badge.svg)](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml)
-[![Phase](https://img.shields.io/badge/phase-5%20in%20review-d29922.svg)](#status)
+[![Phase](https://img.shields.io/badge/phase-6%20in%20review-d29922.svg)](#status)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-000000.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Java](https://img.shields.io/badge/Java-25-ED8B00.svg?logo=openjdk&logoColor=white)](https://openjdk.org)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4-6DB33F.svg?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![Python](https://img.shields.io/badge/Python-3.13-3776AB.svg?logo=python&logoColor=white)](https://www.python.org)
+[![UV](https://img.shields.io/badge/UV-managed-DE5FE9.svg)](https://docs.astral.sh/uv/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1.svg?logo=postgresql&logoColor=white)](#requires)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?logo=docker&logoColor=white)](#quick-start)
 
@@ -24,15 +26,15 @@ Next.js ──► Rust gateway ──► RabbitMQ ──┬──► Java analyt
 
 ## Status
 
-**Phase 5: Java analytics, implemented and pending owner review.** The Spring Boot
-consumer validates (but never migrates) the shared schema, owns a durable RabbitMQ
-queue, and idempotently computes DORA rollups, build/repository scores, and flaky
-tests into the four tables granted to `buildlens_analytics`. The gateway also now
-downloads bounded workflow artifacts and parses JUnit XML into `test_results`,
-keeping GitHub credentials on the Rust side of the boundary. Phases 1–4 are merged.
+**Phase 6: Python AI worker, implemented and pending owner review.** The UV-managed
+FastAPI service consumes thin RabbitMQ triggers, reads facts/analytics from
+Postgres and bounded failure excerpts from MinIO, and produces structured,
+evidence-backed reports. Event receipts and per-run uniqueness protect paid model
+calls from ordinary redelivery; a serialized `$10` monthly cap keeps model spend
+bounded. Phase 5 is merged.
 
-`AGENTS.md` is the handoff: current state, the invariants not to break, and the
-delivered Phase 2 design. `docs/phases.md` is the decision log.
+`AGENTS.md` is the handoff: current state, the invariants not to break, and each
+delivered phase's load-bearing choices. `docs/phases.md` is the decision log.
 
 ## Quick start
 
@@ -43,10 +45,12 @@ make env      # create .env from .env.example
 make up       # postgres, redis, rabbitmq, minio + run migrations
 make dev      # gateway on the host, against the dockerised stack
 make analytics-dev # analytics on the host (run in another terminal)
+make ai-dev   # AI worker on the host (run in another terminal)
 
 curl localhost:8080/health         # liveness: is the process alive?
 curl localhost:8080/health/ready   # readiness: can it reach its dependencies?
 curl localhost:8081/actuator/health # analytics + database/RabbitMQ health
+curl localhost:8082/health/ready    # AI worker + database/RabbitMQ health
 ```
 
 `make help` lists the rest.
@@ -62,6 +66,7 @@ MinIO. Run them in order.
 - Docker and Docker Compose.
 - Rust 1.94+ (the gateway runs on the host via `make dev`).
 - Java 25+ and Maven 3.6.3+ (analytics runs on the host via `make analytics-dev`).
+- UV and Python 3.13+ (the AI worker runs on the host via `make ai-dev`).
 - Node.js (for the webhook tunnel in step 3), or any equivalent tunnel.
 - A **GitHub OAuth App** (Settings → Developer settings → OAuth Apps). Set its
   callback URL to `http://localhost:8080/auth/github/callback`. Note the client
@@ -78,14 +83,17 @@ make env       # copies .env.example -> .env (does not overwrite an existing one
 
 Then fill in, in `.env`:
 
-- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` — from the OAuth App above.
-- `GITHUB_REDIRECT_URI` — `http://localhost:8080/auth/github/callback`.
-- `GITHUB_WEBHOOK_URL` — your public tunnel URL (the smee channel). This is what
+- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` - from the OAuth App above.
+- `GITHUB_REDIRECT_URI` - `http://localhost:8080/auth/github/callback`.
+- `GITHUB_WEBHOOK_URL` - your public tunnel URL (the smee channel). This is what
   BuildLens registers on each tracked repository.
-- `GITHUB_WEBHOOK_SECRET` — any string of 32+ characters. BuildLens signs and
+- `GITHUB_WEBHOOK_SECRET` - any string of 32+ characters. BuildLens signs and
   verifies deliveries with it.
-- `TOKEN_ENCRYPTION_KEY` — 32 bytes, base64-encoded (`openssl rand -base64 32`).
+- `TOKEN_ENCRYPTION_KEY` - 32 bytes, base64-encoded (`openssl rand -base64 32`).
   The all-zero default is for throwaway local use only.
+- `ANTHROPIC_API_KEY` - an Anthropic API key for Phase 6 generation.
+- `AI_MANUAL_TRIGGER_TOKEN` - a random 32+ character token protecting manual
+  report retries (`openssl rand -hex 32`).
 
 The RabbitMQ and S3/MinIO values already point at the compose services and need
 no changes for local development.
@@ -132,13 +140,22 @@ make analytics-dev
 curl localhost:8081/actuator/health
 ```
 
+Start the AI worker in a third terminal. Successful-build summaries and scheduled
+reports are disabled by default. A pending failed-run claim can still be recovered
+on startup, so use a real key only when generation is intended:
+
+```bash
+make ai-dev
+curl localhost:8082/health/ready
+```
+
 ### 5. Log in with GitHub
 
 Open **http://localhost:8080/auth/github/login** in a browser and approve. This
 completes the OAuth round-trip, stores your GitHub token (encrypted), creates
 your personal organization, and sets the `buildlens_session` cookie.
 
-Find your organization id and copy the session cookie for the API calls below —
+Find your organization id and copy the session cookie for the API calls below -
 in the same browser, open **http://localhost:8080/me** for the org `id`, and copy
 the `buildlens_session` cookie value from the browser dev tools.
 
@@ -181,6 +198,8 @@ SELECT overall_score, grade FROM repository_scores
   ORDER BY computed_at DESC LIMIT 5;
 SELECT granularity, deployment_count, lead_time_p50_seconds
   FROM dora_metrics ORDER BY period_start DESC LIMIT 10;
+SELECT kind, status, model, cost_usd, latency_ms
+  FROM ai_reports ORDER BY requested_at DESC LIMIT 5;
 ```
 
 To watch the messages on the bus, bind a throwaway queue to the events exchange
@@ -196,9 +215,9 @@ curl -s -u buildlens:buildlens_dev_password -H content-type:application/json \
 
 Then, using `buildlens` / `buildlens_dev_password`:
 
-- **RabbitMQ** — http://localhost:15672 → Queues → `observe` shows the
+- **RabbitMQ** - http://localhost:15672 → Queues → `observe` shows the
   `workflow_run.completed` / `deployment.recorded` messages arriving.
-- **MinIO** — http://localhost:9001 → the `buildlens-logs` bucket holds the run
+- **MinIO** - http://localhost:9001 → the `buildlens-logs` bucket holds the run
   log zips.
 
 ### 8. Shut down
@@ -254,7 +273,7 @@ development, use a webhook forwarding tunnel. `GITHUB_API_BASE_URL` defaults to
 | ------------ | ---------------------------------------------------------- |
 | `gateway/`   | Rust + Axum. Auth, GitHub API, repository sync and webhooks. |
 | `analytics/` | Java + Spring Boot. DORA, scoring, flaky-test analytics.    |
-| `ai-worker/` | Python + FastAPI. Summaries, recommendations. *Phase 6.*    |
+| `ai-worker/` | Python + FastAPI + UV. Grounded summaries and recommendations. |
 | `frontend/`  | Next.js dashboard. *Phase 7.*                              |
 | `contracts/` | Shared RabbitMQ event envelope, per-event examples, topology. |
 | `infra/`     | Migrations, compose config, service roles, bucket setup.    |
@@ -283,5 +302,6 @@ idempotent. Duplicates are survivable; silent loss is not.
 
 ## Requires
 
-Docker, Docker Compose, Rust 1.94+, Java 25+, and Maven 3.6.3+. Postgres 18 is
-required because the schema uses native `uuidv7()`; the compose file pins it.
+Docker, Docker Compose, Rust 1.94+, Java 25+, Maven 3.6.3+, UV, and Python 3.13+.
+Postgres 18 is required because the schema uses native `uuidv7()`; the compose
+file pins it.

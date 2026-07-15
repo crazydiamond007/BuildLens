@@ -4,14 +4,14 @@
 //! Shared by two callers: the webhook processor (live `workflow_run` /
 //! `workflow_job` deliveries) and the backfill (`repository_sync`). Both land in
 //! the same upserts so a run ingested from history and the same run arriving by
-//! webhook converge on one row — keyed `(github_run_id, run_attempt)`, because
+//! webhook converge on one row - keyed `(github_run_id, run_attempt)`, because
 //! every re-run attempt is its own row (invariant #6).
 //!
 //! Two events are emitted here, and only on a *transition* into the completed
 //! state, so a replayed webhook does not re-fire them (the outbox already makes
 //! delivery at-least-once; this keeps the common case at exactly-once):
-//!   - `workflow_run.completed` — the DORA / flaky-test trigger.
-//!   - `deployment.recorded` — when a successful default-branch run is inferred
+//!   - `workflow_run.completed` - the DORA / flaky-test trigger.
+//!   - `deployment.recorded` - when a successful default-branch run is inferred
 //!     to be a production deployment.
 
 use chrono::{DateTime, Utc};
@@ -45,7 +45,7 @@ pub async fn ingest_workflow_run(
     workflow: Option<&GitHubWorkflow>,
 ) -> Result<Uuid, AppError> {
     // Prefer the workflow object off the webhook; otherwise resolve the FK from
-    // a workflow synced earlier. Null is fine — the FK is nullable on purpose.
+    // a workflow synced earlier. Null is fine - the FK is nullable on purpose.
     let workflow_id = match workflow {
         Some(workflow) => Some(upsert_workflow(transaction, repository_id, workflow).await?),
         None => {
@@ -209,7 +209,7 @@ pub async fn upsert_workflow(
 }
 
 /// Ingests one job and its steps. Returns `false` (and does nothing) when the
-/// run it belongs to has not been ingested yet — a `workflow_job` can arrive
+/// run it belongs to has not been ingested yet - a `workflow_job` can arrive
 /// before its `workflow_run` (webhooks are unordered). The delivery is recorded
 /// and ignored; the job re-arrives with the run, or the backfill catches it.
 pub async fn ingest_workflow_job(

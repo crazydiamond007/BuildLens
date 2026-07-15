@@ -9,11 +9,11 @@ shared Postgres.
 
 ---
 
-## Status: Phase 5 implemented on its feature branch and pending owner review.
+## Status: Phase 6 implemented on its feature branch and pending owner review.
 
 Phase 1 delivered infrastructure and the full database schema. Phase 2 delivered
 GitHub OAuth, Redis sessions, API tokens, unified authentication, organization and
-membership APIs, and audit logging — committed on `feat/phase-2-auth` and verified
+membership APIs, and audit logging - committed on `feat/phase-2-auth` and verified
 end-to-end against the live stack: health, auth gating, the session and
 `Bearer` paths, organization authorization, audit writes, and the per-role grant
 boundary (the gateway can INSERT `organizations` but cannot INSERT `dora_metrics`
@@ -26,12 +26,12 @@ background processing for `push`, `pull_request`, and `pull_request_review`).
 
 Phase 4 is merged: workflow ingestion (runs/jobs/steps,
 per-attempt), workflow-run backfill, build-log storage to MinIO, inferred
-deployments, the event contract in `contracts/`, and — the headline — the
+deployments, the event contract in `contracts/`, and - the headline - the
 transactional-outbox relay that publishes to RabbitMQ. Verified end-to-end against
 the live stack: a signed `workflow_run` webhook produces `workflow_runs` /
 `workflow_jobs` / `workflow_steps` rows, an inferred `deployments` row, two
 `event_outbox` rows written in the ingest transaction, and the relay publishes both
-to the `buildlens.events` topic exchange with publisher confirms — a bound test
+to the `buildlens.events` topic exchange with publisher confirms - a bound test
 queue received both messages, each carrying the envelope with its `message_id`
 idempotency key. A duplicate run emitted no new events (idempotent emission).
 Since verified against a **real** repository: tracking `crazydiamond007/Webhook`
@@ -40,7 +40,7 @@ steps and 8 inferred deployments, and the relay published all 46 events. The one
 path still unconfirmed on real data is webhook-time log capture on a *live* run
 (backfill deliberately does not fetch logs).
 
-Phase 5 is implemented on `feat/phase-5-java-analytics`: a Java 25 / Spring Boot
+Phase 5 is merged: a Java 25 / Spring Boot
 4.1 analytics service consumes the two thin events, validates the migration-owned
 schema, and writes DORA rollups, build/repository scores, and flaky-test verdicts.
 The gateway now parses bounded JUnit artifacts into `test_results`. Live-stack
@@ -49,8 +49,20 @@ valid workflow and deployment triggers, duplicate recomputation with unchanged r
 counts, unknown-version dead-lettering, the Compose container health check, and the
 analytics role grant boundary. No tracked real run currently exposes a JUnit
 artifact, so artifact capture is covered by parser tests but is not yet confirmed
-end-to-end against GitHub. **Phases 6-8 do not exist yet:** no Python worker or
-frontend. Phase 6 is next only after owner review and Phase 5 merge.
+end-to-end against GitHub.
+
+Phase 6 is implemented on `feat/phase-6-ai-worker`: a UV-managed Python 3.13 /
+FastAPI service consumes the same thin events, reads facts/derivations from
+Postgres and bounded failure excerpts from MinIO, and writes structured grounded
+reports and recommendations. Migration 12 adds its event-ID receipt ledger because
+ordinary at-least-once redelivery cannot be allowed to duplicate a paid model call.
+Live-stack verification covered Postgres 18 migration/grants, the durable RabbitMQ
+queue and DLX, valid duplicate no-op processing with one receipt and zero reports,
+unknown-version dead-lettering, container health/readiness, and the manual endpoint
+auth boundary. Seventeen unit tests cover config, event validation, grounding, redaction, and
+cost accounting. A real Anthropic generation is not yet exercised because the
+local `.env` has no API key. **Phases 7-8 do not exist yet:** no frontend or
+hardening phase. Phase 7 starts only after owner review and Phase 6 merge.
 
 Phase list and the reasoning behind each Phase 1 decision: `docs/phases.md`.
 
@@ -66,9 +78,9 @@ directory with a README is the correct state for work that has not been approved
 not receive finished code. Where the Rust/Java/Python boundary or an event contract
 needs a judgement call, surface it rather than silently picking.
 
-**Keep changes scoped to the current phase.** Phases 1–4 are merged. Phase 5 is in
+**Keep changes scoped to the current phase.** Phases 1-5 are merged. Phase 6 is in
 review. Work each phase on its own branch (`feat/phase-N-...`) and open it for
-review before it merges — the owner reviews, with Claude, before the next phase
+review before it merges - the owner reviews, with Claude, before the next phase
 starts.
 
 ---
@@ -85,7 +97,8 @@ Python never migrates. New migration: `make migrate-create NAME=whatever`.
 The rule is *facts versus derivations*. The gateway talks to GitHub, so it owns
 every observed fact. Analytics computes, so it owns every derived number. The AI
 worker generates, so it owns its reports. Everyone reads everything. This is
-enforced by grants in `000010_grants.up.sql`, not by convention. Analytics
+enforced by the initial grants in `000010_grants.up.sql` and grants added alongside
+later tables, not by convention. Analytics
 physically cannot insert into `workflow_runs`, and **nobody** can UPDATE or DELETE
 `audit_logs`. If you add a table, add its grant.
 
@@ -161,13 +174,13 @@ gateway/          Rust + Axum. Auth, GitHub API, sync, and webhook ingestion.
   src/logs.rs       build-log storage to S3/MinIO (best-effort, off the hot path)
   src/junit.rs      bounded JUnit artifact parsing into test_results
   src/routes/       auth/tenancy/tokens plus repository discovery and tracking
-infra/migrations/ 11 migrations, 27 tables. The source of truth for the schema.
+infra/migrations/ 12 migrations, 28 application tables. The schema source of truth.
 infra/postgres/   init/01-roles.sh: creates the 3 service roles (passwords can't
                   live in a migration, so role creation cannot either)
 infra/minio/      bootstrap.sh: creates the buckets
 contracts/        the event envelope, per-event examples, topology, versioning
 analytics/        Java 25 + Spring Boot. Rabbit consumer and derived analytics.
-ai-worker/        empty. Phase 6.
+ai-worker/        Python + FastAPI + UV. Grounded AI reports and recommendations.
 frontend/         empty. Phase 7.
 docs/phases.md    the decision log; read it
 ```
@@ -193,7 +206,7 @@ warnings`, and `cargo test`. Gate analytics on `mvn test package`; all pass toda
 
 ## Phase 2: Auth & GitHub OAuth (Rust). Delivered.
 
-The OAuth flow, opaque Redis sessions (httpOnly cookie, revocable — not a JWT),
+The OAuth flow, opaque Redis sessions (httpOnly cookie, revocable - not a JWT),
 AES-GCM-encrypted GitHub tokens, hashed API tokens with a clear lookup prefix, the
 `owner|admin|member|viewer` org model with a personal org per user, and audit
 logging are all in. The API surface is in `README.md`; the load-bearing decisions
@@ -207,19 +220,19 @@ added: `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI`,
 
 Phase 3 is where facts start flowing out of GitHub. Phase 2 left us a logged-in
 user with an encrypted OAuth token; Phase 3 uses it to populate the repository side
-of the schema — `repositories`, `repository_sync_state`, `branches`, `commits`,
-`pull_requests` — and stands up the webhook receiver that keeps them current. It is
+of the schema - `repositories`, `repository_sync_state`, `branches`, `commits`,
+`pull_requests` - and stands up the webhook receiver that keeps them current. It is
 **Rust-only**. No Java, no Python, no RabbitMQ yet.
 
 ### Decisions locked by the owner
 
-**GitHub is called as the user, with their decrypted OAuth token** — not a GitHub
+**GitHub is called as the user, with their decrypted OAuth token** - not a GitHub
 App installation token. The Phase 2 scopes (`read:user user:email repo read:org`)
 already cover reading repos and managing repo hooks. A GitHub App would give higher
 rate limits and per-install webhooks, at the cost of a much larger setup; for a
 portfolio project the user-token path is the pragmatic call. **Boundary flag:** if
 you ever want org-wide install without each user having admin, that is the App
-route — decide now, because it changes the webhook story below.
+route - decide now, because it changes the webhook story below.
 
 **Conditional requests and rate-limit handling are mandatory, not polish.** That is
 the entire reason `repository_sync_state` carries an `etag` and a `cursor` per
@@ -240,7 +253,7 @@ run of bad signatures is a security signal and deleting it erases the evidence.
 
 **Webhook idempotency is the `webhook_deliveries.github_delivery_id` UNIQUE
 constraint.** Insert the delivery first; a replayed `X-GitHub-Delivery` collides and
-is dropped instead of double-counting. The table doubles as a replay log — the fix
+is dropped instead of double-counting. The table doubles as a replay log - the fix
 for a processing bug is to correct the code and re-drive the stored payloads, not to
 beg GitHub to resend.
 
@@ -250,7 +263,7 @@ a delivery into `branches` / `commits` / `pull_requests` rows happens separately
 `webhook_deliveries_pending_idx` is literally "the work queue for the webhook
 processor". A single-process background task draining that queue is fine for Phase 3.
 
-**Boundary flag — the outbox stays empty in Phase 3.** The gateway *has* the grant
+**Boundary flag - the outbox stays empty in Phase 3.** The gateway *has* the grant
 to write `event_outbox`, but the relay that publishes it is Phase 4. Do not start
 writing outbox rows now; they would just pile up unpublished. Phase 3 gets facts
 into Postgres and no further. Event contracts and publishing are Phase 4's job.
@@ -269,7 +282,7 @@ into Postgres and no further. Event contracts and publishing are Phase 4's job.
 - **Initial sync** for a tracked repo: backfill `branches`, `commits`,
   `pull_requests`, paginated and resumable via the `repository_sync_state`
   cursors/etags, updating `sync_status` / `last_synced_at` / `last_error` as it goes.
-- **Webhook receiver:** `POST /webhooks/github` — verify signature, dedupe on
+- **Webhook receiver:** `POST /webhooks/github` - verify signature, dedupe on
   `github_delivery_id`, persist to `webhook_deliveries`, return `2xx`.
 - **Webhook processor:** drain pending deliveries and apply `push`,
   `pull_request`, and `pull_request_review` events to branches, commits, PRs, and
@@ -280,15 +293,15 @@ into Postgres and no further. Event contracts and publishing are Phase 4's job.
 
 ### Config added
 
-- `GITHUB_WEBHOOK_SECRET` — the HMAC secret for signature verification.
-- `GITHUB_WEBHOOK_URL` — the public callback registered on tracked repositories.
-- `GITHUB_API_BASE_URL` — defaults to `https://api.github.com` and can target a
+- `GITHUB_WEBHOOK_SECRET` - the HMAC secret for signature verification.
+- `GITHUB_WEBHOOK_URL` - the public callback registered on tracked repositories.
+- `GITHUB_API_BASE_URL` - defaults to `https://api.github.com` and can target a
   test server.
 
 ### Deliberately absent (do NOT build in Phase 3)
 
 `workflow_runs` / `jobs` / `steps` ingestion and build-log storage to MinIO
-(Phase 4). Deployment ingestion (depends on workflow runs — Phase 4+). RabbitMQ
+(Phase 4). Deployment ingestion (depends on workflow runs - Phase 4+). RabbitMQ
 publishing and the outbox relay (Phase 4). DORA / scoring / flaky-test analytics
 (Phase 5, Java). Anything Python or frontend.
 
@@ -311,13 +324,13 @@ GitHub credentials. The existing grant therefore remains unchanged.
 
 ## Phase 4: Workflow ingestion, log storage & the event relay (Rust). Delivered.
 
-Phase 4 turns builds into facts and stands up the message bus. Still **Rust-only** —
-no Java or Python — but it defines the contract those services will consume.
+Phase 4 turns builds into facts and stands up the message bus. Still **Rust-only** -
+no Java or Python - but it defines the contract those services will consume.
 
 ### Decisions made in Phase 4
 
 **Events are triggers, not the source of truth.** Postgres is. An event says "repo
-X has a new completed run — recompute", carrying only routing + an idempotency key;
+X has a new completed run - recompute", carrying only routing + an idempotency key;
 consumers read Postgres for detail. This keeps the wire format small and stable.
 The full contract (envelope, events, topology, versioning, idempotency) is in
 `contracts/`. **Boundary flag:** this is the Rust→Java/Python seam. If Phase 5 wants
@@ -332,7 +345,7 @@ version bump.
 **Deployments are inferred, not yet ingested from the Deployment API.** A
 successful `push`/`release`/`workflow_dispatch` run on the default branch becomes a
 `workflow_inferred` production deployment (idempotent via the partial unique index).
-Real GitHub Deployment ingestion is additive and deferred — see `docs/phases.md`.
+Real GitHub Deployment ingestion is additive and deferred - see `docs/phases.md`.
 
 **Log storage is best-effort and off the hot path.** On a completed run the
 processor spawns a task that downloads the run's log zip and stores it to MinIO;
@@ -346,11 +359,11 @@ installation token instead; this is a deliberate portfolio-scope simplification.
 
 ### Delivered scope
 
-- **Workflow ingestion** — `workflow_run` and `workflow_job` webhooks and a
+- **Workflow ingestion** - `workflow_run` and `workflow_job` webhooks and a
   resumable REST backfill (`workflows`, then `workflow_runs` with their jobs/steps)
   populate `workflows` / `workflow_runs` / `workflow_jobs` / `workflow_steps`,
   per-attempt, with soft head-commit / PR FK resolution.
-- **The outbox relay** (`relay.rs`) — declares the `buildlens.events` topic
+- **The outbox relay** (`relay.rs`) - declares the `buildlens.events` topic
   exchange and a DLX, drains `event_outbox` with `FOR UPDATE SKIP LOCKED`,
   publishes with confirms, marks published only on ack, backs off and dead-ends
   after `MAX_ATTEMPTS`, and reconnects on connection loss.
@@ -365,7 +378,7 @@ existing RabbitMQ/MinIO vars; the gateway now depends on both being healthy.
 
 ### Deliberately absent when Phase 4 shipped
 
-DORA / scoring / flaky-test analytics (Phase 5, Java — it reads these facts and the
+DORA / scoring / flaky-test analytics (Phase 5, Java - it reads these facts and the
 events). JUnit parsing into `test_results`. Real GitHub Deployment API ingestion.
 Anything Python or frontend.
 
@@ -376,13 +389,13 @@ Anything Python or frontend.
 Phase 5 is the **first non-Rust service and the first consumer**. The gateway now
 produces facts (in Postgres) and events (on RabbitMQ). Analytics turns them into the
 derived numbers the dashboard shows: DORA, build/repo scores, flaky tests. It is
-Spring Boot, and it writes **only** the derivation tables — nothing it touches is a
+Spring Boot, and it writes **only** the derivation tables - nothing it touches is a
 fact from GitHub. **This is the Rust→Java boundary; the calls below are the ones the
 owner confirmed before implementation.**
 
 ### Decisions locked in
 
-**Analytics reads facts and writes only derivations — the grants already enforce
+**Analytics reads facts and writes only derivations - the grants already enforce
 it.** The service connects as the `buildlens_analytics` role and can `INSERT` /
 `UPDATE` / `DELETE` exactly four tables: `dora_metrics`, `repository_scores`,
 `build_scores`, `flaky_tests` (`000010_grants.up.sql`). It **physically cannot**
@@ -409,14 +422,14 @@ crashed on.
 
 **Recompute is natural-key replacement, so it is idempotent by construction.**
 Every metric is a pure function of the facts. Write it as an UPSERT on the natural
-key — the two partial unique indexes on `dora_metrics`, the `UNIQUE`
+key - the two partial unique indexes on `dora_metrics`, the `UNIQUE`
 `build_scores.workflow_run_id`, `flaky_tests (repository_id, test_key)`. A duplicate
 event recomputes the same row; never append. Because of this, a separate
-processed-events ledger is probably unnecessary — flag it if you think strict
+processed-events ledger is probably unnecessary - flag it if you think strict
 once-only side effects are needed, because that ledger would need a migration + grant.
 
 **Percentiles, not means.** `dora_metrics` stores `lead_time_p50/p90`, `mttr_p50/p90`
-and `sample_size`. Compute distributions and populate `sample_size` honestly — the UI
+and `sample_size`. Compute distributions and populate `sample_size` honestly - the UI
 uses it to decline drawing a confident line through four data points.
 
 ### Delivered scope
@@ -468,7 +481,7 @@ No Phase 5 schema migration was needed.
 
 ---
 
-## Phase 6: AI build summaries & recommendations (Python). Next — brief.
+## Phase 6: AI build summaries & recommendations (Python). Implemented, pending review.
 
 Phase 6 is the **first Python service and the third consumer**. Rust produced the
 facts, Java derived the numbers; Phase 6 *explains* them. It consumes the same
@@ -476,19 +489,22 @@ events, reads facts from Postgres and build logs from MinIO, calls an LLM, and
 writes `ai_reports` and `ai_recommendations`. FastAPI is the shell (health +
 manual re-trigger); the RabbitMQ consumer is the substance.
 
-### Decisions to lock in
+### Decisions locked in
 
-**It owns only `ai_reports` and `ai_recommendations` — the grants enforce it.** The
-service connects as `buildlens_ai` and can write exactly those two tables
-(`000010_grants.up.sql`); it reads everything else. Invariant #2. Python **never
-migrates** (invariant #1) — a new table (e.g. a processed-events ledger) goes
-through `make migrate-create` **with a grant**, not a service-side migration.
+**It owns only its reports, recommendations, and receipt ledger - the grants
+enforce it.** The service connects as `buildlens_ai`; migration 12 grants it writes
+to `ai_event_receipts`, alongside the existing `ai_reports` and
+`ai_recommendations` grants. It reads every fact/derivation and physically cannot
+write `workflow_runs` or audit history. Python **never migrates** (invariant #1).
 
-**Idempotency is a *paid* concern here — a duplicate event is a duplicate LLM
+**Idempotency is a *paid* concern here - a duplicate event is a duplicate LLM
 bill.** The `ai_reports (workflow_run_id, kind)` partial UNIQUE is the guard:
 `INSERT ... ON CONFLICT DO NOTHING` a `pending` row *first*, and only call the
-model if you won the insert. Never regenerate on a replay. Delivery is
-at-least-once (invariant #5); dedupe on the envelope `id` too.
+model if you won the insert. Migration 12's `ai_event_receipts.event_id` UNIQUE
+also deduplicates no-op and repository-level triggers. Never regenerate a completed
+report on replay. A crash after the provider responds but before Postgres commits
+is the unavoidable external-side-effect window; stale claims recover rather than
+silently lose the report.
 
 **Consumer owns its topology.** Declare a durable queue (e.g. `ai.reports`) bound
 to `buildlens.events` on `workflow_run.*` / `deployment.*`, dead-lettered to
@@ -498,9 +514,8 @@ report row is committed (or the message is dead-lettered).
 **Output must be grounded and checkable.** `ai_reports.content` (jsonb) and
 `ai_recommendations.evidence` (jsonb) carry the cited job/step ids, failing
 `test_key`s, and log line ranges the model looked at. Use **structured outputs**
-(`output_config={"format": {"type": "json_schema", "schema": ...}}`, or
-`client.messages.parse(...)` with a Pydantic model) so the model returns exactly
-the JSON these columns expect — not prose you then regex.
+(`client.messages.parse(...)` with a Pydantic model) so the model returns exactly
+the JSON these columns expect - not prose you then regex.
 
 **Provenance and unit economics are columns, so populate them every call.**
 `ai_reports` has `model`, `prompt_version`, `input_tokens`, `output_tokens`,
@@ -508,51 +523,66 @@ the JSON these columns expect — not prose you then regex.
 of time with `client.messages.count_tokens(...)`, **never tiktoken** (it undercounts
 Claude). A prompt change stays attributable, and cost stays visible.
 
-**Model choice is the owner's call — boundary flag.** Use the official Anthropic
-Python SDK (`pip install anthropic`; `anthropic.Anthropic()`;
-`client.messages.create(...)`), `ANTHROPIC_API_KEY` from env. Suggested tiering, to
-confirm: `claude-opus-4-8` (default; $5/$25 per Mtok) for `failure_analysis` with
-adaptive thinking (`thinking={"type": "adaptive"}`); a cheaper/faster tier —
-`claude-haiku-4-5` ($1/$5) or `claude-sonnet-5` ($3/$15) — for per-build
-`build_summary`. Prompt-cache the shared system prompt and the large log context
-(`cache_control`). Cap `max_tokens`. **The tier per report kind and a monthly cost
-ceiling are decisions to settle before building.**
+**The owner chose the tiers and hard cap.** `claude-opus-4-8` handles
+`failure_analysis` with adaptive thinking; `claude-haiku-4-5` handles summaries
+and digests. Shared prompt/context blocks use ephemeral prompt caching. The worker
+counts tokens before generation, projects the worst normal cache-write/output
+cost, and serializes admission under a Postgres advisory lock against a hard
+`$10.00` monthly ceiling. Billable failed attempts accumulate into the report's
+accounting totals; unknown model prices fail closed.
 
-**Data-egress flag — this is the first outward data flow to a third party.** Build
-logs and code snippets leave the box for the Anthropic API. Confirm that is
-acceptable for the tracked repositories, decide what gets redacted, and note the
-API's data-retention terms. This is the owner's call, not Codex's.
+**Data egress is deliberately narrow and approved.** Only structured facts and
+bounded failing-log excerpts go to Anthropic; raw archives are not sent and the
+worker never fetches repository source files. Every outbound string, including
+JUnit failure messages, passes the secret redactor. The owner accepted Anthropic's
+standard retention terms. Log archives
+are guarded by download, entry-count, per-entry, uncompressed-size, line-count,
+and prompt-byte ceilings plus zip traversal checks.
 
-### Scope to build
+### Delivered scope
 
-- **A Python service in `ai-worker/`** (FastAPI for `/health` + a manual
-  re-trigger endpoint; the core is a RabbitMQ consumer — `aio-pika` or `pika`),
+- **A UV-managed Python 3.13 service in `ai-worker/`** (FastAPI for liveness,
+  dependency readiness, and bearer-protected manual retry; `aio-pika` consumer),
   connecting as `buildlens_ai`, added to `docker-compose.yml` under the `app`
   profile with `depends_on` postgres/rabbitmq healthy + migrator completed.
 - **`failure_analysis`** on a failed `workflow_run.completed`: pull the run, its
   jobs/steps, and failing `test_results` from Postgres (the gateway now populates
   them) + the run's log zip from MinIO, call the model, write one `ai_reports` row
   (`kind = failure_analysis`) and any `ai_recommendations`.
-- **`build_summary`** (optional, cheap tier) on success.
-- **Scheduled `weekly_digest` / `repo_health`** per repo, reading the
-  `dora_metrics` / `flaky_tests` / `*_scores` that Phase 5 writes.
-- Idempotent on `(workflow_run_id, kind)` and the envelope id; poison/oversized
-  messages dead-lettered.
+- **`build_summary`** on success, feature-flagged off by default to avoid
+  unintentional per-run spend.
+- **Scheduled `weekly_digest` / `repo_health`**, feature-flagged off by default,
+  reading Phase 5's `dora_metrics` / `flaky_tests` / `*_scores`, plus stale
+  pending/processing claim recovery.
+- Idempotent on `(workflow_run_id, kind)` and envelope id; poison/oversized /
+  unknown-version messages dead-lettered.
+- Structured output grounding validates every cited job, step, test, log range,
+  and metric key against the supplied context before committing.
 
-### Config to add
+### Config added
 
-`ANTHROPIC_API_KEY`, the model-tier settings, `AI_DB_PASSWORD` + the
-`buildlens_ai` `DATABASE_URL`, `RABBITMQ_URL`, and the S3/MinIO credentials (to
-read the log objects). All required at boot.
+`ANTHROPIC_API_KEY`, `AI_MANUAL_TRIGGER_TOKEN`, `AI_FAILURE_MODEL`,
+`AI_SUMMARY_MODEL`, `AI_MONTHLY_COST_CAP_USD`,
+`AI_SUCCESS_SUMMARIES_ENABLED`, `AI_SCHEDULED_REPORTS_ENABLED`, `AI_DB_PASSWORD` +
+the `buildlens_ai` `DATABASE_URL`, `RABBITMQ_URL`, and S3/MinIO read credentials.
+Dependency and secret values are required and validated at boot.
 
-### Open decisions (resolve before/early in Phase 6)
+### Decisions resolved during Phase 6
 
-- **Model tier per report kind + a monthly cost cap** (owner call).
-- **Does `build_summary` run on every run or only failures?** — pure cost.
-- **Data egress / redaction policy** for logs and code sent to the API (owner call).
+- **Use UV, not Poetry.** The lock file is committed and CI uses
+  `uv sync --frozen` plus Ruff and pytest.
+- **Opus for failures, Haiku for lower-cost summaries, `$10/month` hard cap.**
+- **Do not summarize every successful run by default.** It is opt-in via env.
+- **Scheduled reports are implemented but opt-in.** Startup/smoke tests cannot
+  create them just because metrics exist.
+- **Use a receipt ledger.** Paid event-ID idempotency justified migration 12 and
+  its explicit grant; Java analytics still needs no ledger because its effects are
+  deterministic local upserts.
+- **No raw archives or fetched source leave the box.** Only bounded, recursively
+  redacted context is sent under the accepted standard Anthropic retention policy.
 
 ### Deliberately absent (do NOT build in Phase 6)
 
 The Next.js frontend (Phase 7) and hardening (Phase 8). No gateway or analytics
-changes — if the worker needs a fact that is not ingested or derived yet, flag it
+changes - if the worker needs a fact that is not ingested or derived yet, flag it
 back, do not synthesise it.

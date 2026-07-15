@@ -8,7 +8,7 @@ from whichever service touched it first.
 ## The one idea
 
 **Events are triggers, not the source of truth.** Postgres is. An event says
-"this repository has a new completed run — go recompute", and carries just enough
+"this repository has a new completed run - go recompute", and carries just enough
 to route it and to dedupe it. The consumer reads Postgres for the detail. This is
 deliberate: it keeps the wire format small and stable while the schema underneath
 it evolves, and it means a consumer that missed an event can always recover the
@@ -32,15 +32,15 @@ Every event is a JSON object with this envelope. Event-specific fields live unde
 }
 ```
 
-- `id` — a UUIDv7, unique per event. It is also the AMQP `message_id`. **This is
+- `id` - a UUIDv7, unique per event. It is also the AMQP `message_id`. **This is
   the idempotency key.** A consumer that has already processed an `id` must treat
   a second delivery as a no-op.
-- `type` — the event type; equals the AMQP routing key today.
-- `version` — the envelope schema version. Bumped only on a breaking change.
-- `aggregate` — the domain object the event is about.
-- `organization_id` / `repository_id` — denormalised onto every event so a
+- `type` - the event type; equals the AMQP routing key today.
+- `version` - the envelope schema version. Bumped only on a breaking change.
+- `aggregate` - the domain object the event is about.
+- `organization_id` / `repository_id` - denormalised onto every event so a
   consumer can scope work (and authorization) without a lookup.
-- `occurred_at` — when the gateway recorded the fact, not when GitHub emitted it.
+- `occurred_at` - when the gateway recorded the fact, not when GitHub emitted it.
 
 ## Events in Phase 4
 
@@ -60,9 +60,9 @@ Reserved for later phases, so consumers should not treat the list as closed:
 
 ## Topology
 
-- **Exchange** `buildlens.events` — `topic`, durable. The gateway declares it and
+- **Exchange** `buildlens.events` - `topic`, durable. The gateway declares it and
   publishes here. It declares nothing else consumer-facing.
-- **Dead-letter exchange** `buildlens.events.dlx` — `topic`, durable. Declared by
+- **Dead-letter exchange** `buildlens.events.dlx` - `topic`, durable. Declared by
   the gateway so it exists; consumers point their queues' `x-dead-letter-exchange`
   at it.
 - **Queues and bindings are the consumer's responsibility.** A consumer declares

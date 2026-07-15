@@ -1,6 +1,6 @@
 -- Derived metrics. Everything here is written by the Java analytics service and
 -- read by everyone else. Nothing here is a fact from GitHub. It is all a
--- number we computed, and it can always be recomputed from 000003–000005.
+-- number we computed, and it can always be recomputed from 000003-000005.
 --
 -- That property is what lets the analytics service be a dumb, replayable
 -- consumer: if we change how lead time is defined, we truncate and rebuild.

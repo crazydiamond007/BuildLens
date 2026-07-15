@@ -356,7 +356,7 @@ async fn apply_workflow_run(
             .ok_or_else(|| AppError::bad_request("workflow_run payload is missing the run"))?,
     )?;
     // The workflow object rides along on the webhook; the backfill supplies it
-    // separately. Absence is fine — the run's workflow_id FK is nullable.
+    // separately. Absence is fine - the run's workflow_id FK is nullable.
     let workflow = payload
         .get("workflow")
         .cloned()

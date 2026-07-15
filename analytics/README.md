@@ -4,11 +4,11 @@ Phase 5's Spring Boot consumer. It reads GitHub facts from the shared Postgres,
 consumes thin triggers from RabbitMQ, and writes only the four derivation tables
 granted to `buildlens_analytics`:
 
-- `dora_metrics` — repository and organization rollups at daily, ISO-weekly, and
+- `dora_metrics` - repository and organization rollups at daily, ISO-weekly, and
   monthly granularity.
-- `build_scores` — one idempotently replaced score per workflow run.
-- `repository_scores` — one retained daily snapshot for a trailing 30-day window.
-- `flaky_tests` — pass/fail flips between run attempts on an unchanged commit.
+- `build_scores` - one idempotently replaced score per workflow run.
+- `repository_scores` - one retained daily snapshot for a trailing 30-day window.
+- `flaky_tests` - pass/fail flips between run attempts on an unchanged commit.
 
 The service never migrates. Hibernate runs `ddl-auto=validate`; Flyway and
 Liquibase are disabled. Inserts omit primary keys so Postgres 18's `uuidv7()`
