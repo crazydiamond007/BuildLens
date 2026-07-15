@@ -1,7 +1,7 @@
 # BuildLens
 
 [![CI](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml/badge.svg)](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml)
-[![Phase](https://img.shields.io/badge/phase-3%20in%20review-d29922.svg)](#status)
+[![Phase](https://img.shields.io/badge/phase-4%20in%20review-d29922.svg)](#status)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-000000.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1.svg?logo=postgresql&logoColor=white)](#requires)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?logo=docker&logoColor=white)](#quick-start)
@@ -22,11 +22,14 @@ Next.js ──► Rust gateway ──► RabbitMQ ──┬──► Java analyt
 
 ## Status
 
-**Phase 3: repository sync and webhooks, in review.** The gateway discovers a
-user's GitHub repositories, tracks selected repositories, performs resumable
-initial synchronization, and processes signed `push`, `pull_request`, and
-`pull_request_review` webhooks. Phase 2 authentication remains the access-control
-foundation. Phase 4 does not exist yet.
+**Phase 4: workflow ingestion, log storage, and the event relay, in review.** The
+gateway ingests GitHub Actions `workflow_run` / `workflow_job` events (and backfills
+them over REST) into per-attempt `workflow_runs` / `workflow_jobs` / `workflow_steps`
+rows, infers production deployments from successful default-branch runs, stores run
+logs to MinIO, and — the headline — runs the transactional-outbox relay that
+publishes `workflow_run.completed` and `deployment.recorded` to RabbitMQ. The event
+contract every consumer binds to lives in `contracts/`. Phases 1–3 (auth, tenancy,
+repository sync) are merged. Phase 5 (Java analytics) does not exist yet.
 
 `AGENTS.md` is the handoff: current state, the invariants not to break, and the
 delivered Phase 2 design. `docs/phases.md` is the decision log.
@@ -94,7 +97,7 @@ development, use a webhook forwarding tunnel. `GITHUB_API_BASE_URL` defaults to
 | `analytics/` | Java + Spring Boot. DORA, scoring, flaky tests. *Phase 5.*  |
 | `ai-worker/` | Python + FastAPI. Summaries, recommendations. *Phase 6.*    |
 | `frontend/`  | Next.js dashboard. *Phase 7.*                              |
-| `contracts/` | Shared RabbitMQ event schemas. *Phase 4.*                   |
+| `contracts/` | Shared RabbitMQ event envelope, per-event examples, topology. |
 | `infra/`     | Migrations, compose config, service roles, bucket setup.    |
 
 ## Three things worth knowing before reading the code

@@ -1,0 +1,19 @@
+{
+  "id": "01912a3b-4c5d-7e8f-9a0b-1c2d3e4f5062",
+  "type": "deployment.recorded",
+  "version": 1,
+  "occurred_at": "2026-07-15T12:00:00Z",
+  "aggregate": { "type": "deployment", "id": "01912a3b-0000-7000-8000-000000000009" },
+  "organization_id": "01912a3b-0000-7000-8000-0000000000aa",
+  "repository_id": "01912a3b-0000-7000-8000-0000000000bb",
+  "data": {
+    "deployment_id": "01912a3b-0000-7000-8000-000000000009",
+    "workflow_run_id": "01912a3b-0000-7000-8000-000000000001",
+    "environment": "production",
+    "sha": "d6cd1e2bd19e03a81132a23b2025920577f84e37",
+    "is_production": true,
+    "source": "workflow_inferred",
+    "status": "success",
+    "deployed_at": "2026-07-15T12:00:00Z"
+  }
+}

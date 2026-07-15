@@ -30,6 +30,21 @@ pub struct Config {
     pub github_webhook_secret: String,
     pub token_encryption_key: [u8; 32],
     pub session_ttl: Duration,
+    pub rabbitmq_url: String,
+    pub s3: S3Config,
+}
+
+/// Where build logs are stored. MinIO in development, real S3 in production;
+/// the gateway does not care which, because both speak the S3 API. Path-style
+/// addressing (`endpoint/bucket/key`) is what makes a single hostname work for
+/// MinIO, where virtual-host-style (`bucket.endpoint`) does not resolve.
+#[derive(Clone)]
+pub struct S3Config {
+    pub endpoint: Url,
+    pub region: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub logs_bucket: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -107,6 +122,14 @@ impl Config {
             });
         }
 
+        let s3 = S3Config {
+            endpoint: parse_url("S3_ENDPOINT", required("S3_ENDPOINT")?.as_str())?,
+            region: optional("S3_REGION").unwrap_or_else(|| "us-east-1".to_string()),
+            access_key: required("S3_ACCESS_KEY")?,
+            secret_key: required("S3_SECRET_KEY")?,
+            logs_bucket: required("S3_LOGS_BUCKET")?,
+        };
+
         Ok(Self {
             environment: parse_optional("ENVIRONMENT")?.unwrap_or(Environment::Development),
             bind_addr,
@@ -122,6 +145,8 @@ impl Config {
             github_webhook_secret,
             token_encryption_key: encryption_key()?,
             session_ttl: Duration::from_secs(session_ttl_seconds),
+            rabbitmq_url: required("RABBITMQ_URL")?,
+            s3,
         })
     }
 }

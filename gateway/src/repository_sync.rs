@@ -5,8 +5,12 @@ use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    github_api::{GitHubApi, GitHubBranch, GitHubCommit, GitHubPullRequest},
+    github_api::{
+        GitHubApi, GitHubBranch, GitHubCommit, GitHubPullRequest, GitHubRunsPage,
+        GitHubWorkflowsPage,
+    },
     state::AppState,
+    workflow_ingest,
 };
 
 pub async fn sync_repository(
@@ -15,7 +19,7 @@ pub async fn sync_repository(
     token: String,
 ) -> Result<(), AppError> {
     let row = sqlx::query(
-        "SELECT owner_login, name, default_branch
+        "SELECT organization_id, owner_login, name, default_branch
          FROM repositories
          WHERE id = $1 AND tracking_enabled AND deleted_at IS NULL",
     )
@@ -23,6 +27,7 @@ pub async fn sync_repository(
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
+    let organization_id: Uuid = row.try_get("organization_id")?;
     let owner: String = row.try_get("owner_login")?;
     let name: String = row.try_get("name")?;
     let default_branch: String = row.try_get("default_branch")?;
@@ -42,6 +47,26 @@ pub async fn sync_repository(
     if let Err(error) = sync_pull_requests(&state, &api, repository_id, &owner, &name).await {
         record_error(&state, repository_id, "pull_requests", &error).await?;
         errors.push(format!("pull_requests: {error:?}"));
+    }
+    // Workflows before runs, so a run can resolve its workflow FK from a row
+    // that already exists.
+    if let Err(error) = sync_workflows(&state, &api, repository_id, &owner, &name).await {
+        record_error(&state, repository_id, "workflows", &error).await?;
+        errors.push(format!("workflows: {error:?}"));
+    }
+    if let Err(error) = sync_workflow_runs(
+        &state,
+        &api,
+        repository_id,
+        organization_id,
+        &owner,
+        &name,
+        &default_branch,
+    )
+    .await
+    {
+        record_error(&state, repository_id, "workflow_runs", &error).await?;
+        errors.push(format!("workflow_runs: {error:?}"));
     }
 
     if errors.is_empty() {
@@ -244,6 +269,128 @@ async fn sync_pull_requests(
                 request_etag = None;
             }
             None => return finish_resource(state, repository_id, "pull_requests").await,
+        }
+    }
+}
+
+async fn sync_workflows(
+    state: &AppState,
+    api: &GitHubApi<'_>,
+    repository_id: Uuid,
+    owner: &str,
+    name: &str,
+) -> Result<(), AppError> {
+    let (cursor, etag) = begin_resource(state, repository_id, "workflows").await?;
+    let mut first_page = cursor.is_none();
+    let mut url = match cursor {
+        Some(cursor) => parse_cursor(&cursor)?,
+        None => {
+            let mut url = api.endpoint(&["repos", owner, name, "actions", "workflows"])?;
+            url.query_pairs_mut().append_pair("per_page", "100");
+            url
+        }
+    };
+    let mut request_etag = first_page.then_some(etag.as_deref()).flatten();
+    loop {
+        let page = api
+            .page_envelope::<GitHubWorkflowsPage>(url, request_etag)
+            .await?;
+        if page.not_modified {
+            return finish_resource(state, repository_id, "workflows").await;
+        }
+        let workflows = page.body.map(|body| body.workflows).unwrap_or_default();
+        let next = page.next.as_ref().map(Url::as_str);
+        let mut transaction = state.db.begin().await?;
+        for workflow in &workflows {
+            workflow_ingest::upsert_workflow(&mut transaction, repository_id, workflow).await?;
+        }
+        checkpoint(
+            &mut transaction,
+            repository_id,
+            "workflows",
+            next,
+            first_page.then_some(page.etag.as_deref()).flatten(),
+        )
+        .await?;
+        transaction.commit().await?;
+        first_page = false;
+        match page.next {
+            Some(next) => {
+                url = next;
+                request_etag = None;
+            }
+            None => return finish_resource(state, repository_id, "workflows").await,
+        }
+    }
+}
+
+async fn sync_workflow_runs(
+    state: &AppState,
+    api: &GitHubApi<'_>,
+    repository_id: Uuid,
+    organization_id: Uuid,
+    owner: &str,
+    name: &str,
+    default_branch: &str,
+) -> Result<(), AppError> {
+    let (cursor, etag) = begin_resource(state, repository_id, "workflow_runs").await?;
+    let mut first_page = cursor.is_none();
+    let mut url = match cursor {
+        Some(cursor) => parse_cursor(&cursor)?,
+        None => {
+            let mut url = api.endpoint(&["repos", owner, name, "actions", "runs"])?;
+            url.query_pairs_mut().append_pair("per_page", "100");
+            url
+        }
+    };
+    let mut request_etag = first_page.then_some(etag.as_deref()).flatten();
+    loop {
+        let page = api
+            .page_envelope::<GitHubRunsPage>(url, request_etag)
+            .await?;
+        if page.not_modified {
+            return finish_resource(state, repository_id, "workflow_runs").await;
+        }
+        let runs = page.body.map(|body| body.workflow_runs).unwrap_or_default();
+        // Fetch every run's jobs before opening the transaction, so no network
+        // round-trip happens while rows are locked.
+        let mut prepared = Vec::with_capacity(runs.len());
+        for run in runs {
+            let jobs = api.run_jobs(owner, name, run.id).await?;
+            prepared.push((run, jobs));
+        }
+        let next = page.next.as_ref().map(Url::as_str);
+        let mut transaction = state.db.begin().await?;
+        for (run, jobs) in &prepared {
+            workflow_ingest::ingest_workflow_run(
+                &mut transaction,
+                repository_id,
+                organization_id,
+                default_branch,
+                run,
+                None,
+            )
+            .await?;
+            for job in jobs {
+                workflow_ingest::ingest_workflow_job(&mut transaction, repository_id, job).await?;
+            }
+        }
+        checkpoint(
+            &mut transaction,
+            repository_id,
+            "workflow_runs",
+            next,
+            first_page.then_some(page.etag.as_deref()).flatten(),
+        )
+        .await?;
+        transaction.commit().await?;
+        first_page = false;
+        match page.next {
+            Some(next) => {
+                url = next;
+                request_etag = None;
+            }
+            None => return finish_resource(state, repository_id, "workflow_runs").await,
         }
     }
 }

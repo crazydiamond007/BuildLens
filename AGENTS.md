@@ -9,7 +9,7 @@ shared Postgres.
 
 ---
 
-## Status: Phase 3 implemented on its feature branch and pending owner review.
+## Status: Phase 4 implemented on its feature branch and pending owner review.
 
 Phase 1 delivered infrastructure and the full database schema. Phase 2 delivered
 GitHub OAuth, Redis sessions, API tokens, unified authentication, organization and
@@ -20,14 +20,23 @@ boundary (the gateway can INSERT `organizations` but cannot INSERT `dora_metrics
 or UPDATE `audit_logs`) all hold. The one path not exercised at runtime is the real
 GitHub OAuth round-trip, which needs a registered OAuth App's credentials.
 
-Phase 3 is implemented on `feat/phase-3-repository-sync`: repository discovery and
-opt-in tracking, automatic webhook registration, resumable branch/commit/PR sync,
-signed webhook persistence, and background processing for `push`, `pull_request`,
-and `pull_request_review`. The local stack verifies webhook security, idempotent
-processing, and branch/commit/PR writes. A real GitHub sync and hook registration
-still need valid OAuth credentials and a publicly reachable callback during owner
-review. **Phases 4-8 do not exist yet.** There is no workflow ingestion, RabbitMQ
-topology, Java, Python, or frontend.
+Phase 3 is merged (repository discovery and opt-in tracking, automatic webhook
+registration, resumable branch/commit/PR sync, signed webhook persistence, and
+background processing for `push`, `pull_request`, and `pull_request_review`).
+
+Phase 4 is implemented on `feat/phase-4-...`: workflow ingestion (runs/jobs/steps,
+per-attempt), workflow-run backfill, build-log storage to MinIO, inferred
+deployments, the event contract in `contracts/`, and — the headline — the
+transactional-outbox relay that publishes to RabbitMQ. Verified end-to-end against
+the live stack: a signed `workflow_run` webhook produces `workflow_runs` /
+`workflow_jobs` / `workflow_steps` rows, an inferred `deployments` row, two
+`event_outbox` rows written in the ingest transaction, and the relay publishes both
+to the `buildlens.events` topic exchange with publisher confirms — a bound test
+queue received both messages, each carrying the envelope with its `message_id`
+idempotency key. A duplicate run emitted no new events (idempotent emission). The
+untested-at-runtime paths are the ones needing real GitHub: live Actions backfill
+and webhook-triggered log capture (log capture correctly *skips* when no member
+token is available). **Phases 5-8 do not exist yet:** no Java, Python, or frontend.
 
 Phase list and the reasoning behind each Phase 1 decision: `docs/phases.md`.
 
@@ -43,10 +52,10 @@ directory with a README is the correct state for work that has not been approved
 not receive finished code. Where the Rust/Java/Python boundary or an event contract
 needs a judgement call, surface it rather than silently picking.
 
-**Keep changes scoped to the current phase.** Phases 1 and 2 are committed. Phase
-3 is in review. Work
-each phase on its own branch (`feat/phase-N-...`) and open it for review before it
-merges — the owner reviews, with Claude, before the next phase starts.
+**Keep changes scoped to the current phase.** Phases 1–3 are merged. Phase 4 is in
+review. Work each phase on its own branch (`feat/phase-N-...`) and open it for
+review before it merges — the owner reviews, with Claude, before the next phase
+starts.
 
 ---
 
@@ -84,7 +93,8 @@ Fields GitHub controls do not.
 The gateway writes the row and an `event_outbox` row in one Postgres transaction; a
 relay publishes to RabbitMQ afterwards and marks it published. Delivery is
 therefore **at-least-once**, so every consumer must be idempotent. Duplicates are
-survivable; silent loss is not. The table exists; the relay is Phase 4.
+survivable; silent loss is not. The relay lives in `gateway/src/relay.rs`; the
+wire contract every consumer binds to is `contracts/`.
 
 **6. Every re-run attempt is its own `workflow_runs` row.**
 Keyed `(github_run_id, run_attempt)`. GitHub reuses the run ID and increments the
@@ -129,14 +139,18 @@ gateway/          Rust + Axum. Auth, GitHub API, sync, and webhook ingestion.
   src/sessions.rs   opaque Redis sessions and one-time OAuth state
   src/github.rs     OAuth exchange and GitHub identity lookup
   src/github_api.rs authenticated REST client, pagination, ETags, rate limits, hooks
-  src/repository_sync.rs resumable branches, commits, PRs, and review backfill
-  src/webhooks.rs   raw-body signature verification, persistence, background apply
+  src/repository_sync.rs resumable branches, commits, PRs, reviews, workflows, runs
+  src/webhooks.rs   signature verification, persistence, background apply (incl. runs/jobs)
+  src/workflow_ingest.rs runs/jobs/steps upserts, deployment inference, event emission
+  src/events.rs     the outbox writer and the event envelope
+  src/relay.rs      the outbox -> RabbitMQ relay (topology, confirms, backoff)
+  src/logs.rs       build-log storage to S3/MinIO (best-effort, off the hot path)
   src/routes/       auth/tenancy/tokens plus repository discovery and tracking
 infra/migrations/ 11 migrations, 27 tables. The source of truth for the schema.
 infra/postgres/   init/01-roles.sh: creates the 3 service roles (passwords can't
                   live in a migration, so role creation cannot either)
 infra/minio/      bootstrap.sh: creates the buckets
-contracts/        empty. Event schemas land here in Phase 4.
+contracts/        the event envelope, per-event examples, topology, versioning
 analytics/        empty. Phase 5.
 ai-worker/        empty. Phase 6.
 frontend/         empty. Phase 7.
@@ -279,3 +293,65 @@ not forgotten.) Currently granted to the gateway, on the reasoning that parsing 
 reports means downloading an artifact from GitHub and the gateway holds the
 credentials. If Phase 5 would rather Java did it, that is a one-line change in
 `000010_grants.up.sql`.
+
+---
+
+## Phase 4: Workflow ingestion, log storage & the event relay (Rust). Implemented, pending review.
+
+Phase 4 turns builds into facts and stands up the message bus. Still **Rust-only** —
+no Java or Python — but it defines the contract those services will consume.
+
+### Decisions made in Phase 4
+
+**Events are triggers, not the source of truth.** Postgres is. An event says "repo
+X has a new completed run — recompute", carrying only routing + an idempotency key;
+consumers read Postgres for detail. This keeps the wire format small and stable.
+The full contract (envelope, events, topology, versioning, idempotency) is in
+`contracts/`. **Boundary flag:** this is the Rust→Java/Python seam. If Phase 5 wants
+events to carry the computed detail rather than a pointer, that is a contract
+change to make now, before consumers exist.
+
+**Two events ship in Phase 4:** `workflow_run.completed` and `deployment.recorded`,
+emitted only on the *transition* into that state so a replayed webhook does not
+re-fire them. The envelope reserves room for `push.*` / `pull_request.*` without a
+version bump.
+
+**Deployments are inferred, not yet ingested from the Deployment API.** A
+successful `push`/`release`/`workflow_dispatch` run on the default branch becomes a
+`workflow_inferred` production deployment (idempotent via the partial unique index).
+Real GitHub Deployment ingestion is additive and deferred — see `docs/phases.md`.
+
+**Log storage is best-effort and off the hot path.** On a completed run the
+processor spawns a task that downloads the run's log zip and stores it to MinIO;
+any failure is logged and dropped, never blocking the facts that already committed.
+The run log is stored as-is (zipped); unpacking is a consumer's job.
+
+**The relay borrows a member's GitHub token for webhook-time log capture.** A
+webhook has no session, so `github_api::repository_token` picks any org member with
+a valid token. **Boundary flag:** a production system would use a GitHub App
+installation token instead; this is a deliberate portfolio-scope simplification.
+
+### Delivered scope
+
+- **Workflow ingestion** — `workflow_run` and `workflow_job` webhooks and a
+  resumable REST backfill (`workflows`, then `workflow_runs` with their jobs/steps)
+  populate `workflows` / `workflow_runs` / `workflow_jobs` / `workflow_steps`,
+  per-attempt, with soft head-commit / PR FK resolution.
+- **The outbox relay** (`relay.rs`) — declares the `buildlens.events` topic
+  exchange and a DLX, drains `event_outbox` with `FOR UPDATE SKIP LOCKED`,
+  publishes with confirms, marks published only on ack, backs off and dead-ends
+  after `MAX_ATTEMPTS`, and reconnects on connection loss.
+- **Inferred deployments**, **build-log storage to MinIO**, and the **event
+  contract** in `contracts/`.
+
+### Config added
+
+`RABBITMQ_URL`, and `S3_ENDPOINT` / `S3_REGION` / `S3_ACCESS_KEY` / `S3_SECRET_KEY`
+/ `S3_LOGS_BUCKET`. All required at boot. `docker-compose.yml` maps them from the
+existing RabbitMQ/MinIO vars; the gateway now depends on both being healthy.
+
+### Deliberately absent (do NOT build in Phase 4)
+
+DORA / scoring / flaky-test analytics (Phase 5, Java — it reads these facts and the
+events). JUnit parsing into `test_results`. Real GitHub Deployment API ingestion.
+Anything Python or frontend.

@@ -11,14 +11,21 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Row, Transaction};
 use tokio::{sync::watch, time};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    crypto::verify_github_signature, error::AppError, github_api::GitHubPullRequest,
-    repository_sync::upsert_pull_request, state::AppState,
+    crypto::verify_github_signature,
+    error::AppError,
+    github_api::{
+        self, GitHubApi, GitHubJob, GitHubPullRequest, GitHubWorkflow, GitHubWorkflowRun,
+    },
+    repository_sync::upsert_pull_request,
+    state::AppState,
+    workflow_ingest,
 };
 
 const DELIVERY_HEADER: &str = "x-github-delivery";
@@ -191,19 +198,11 @@ async fn claim_delivery(state: &AppState) -> Result<Option<Delivery>, AppError> 
 }
 
 async fn apply_delivery(state: &AppState, delivery: &Delivery) -> Result<(), AppError> {
-    let repository_id = match delivery.github_repo_id {
-        Some(github_repo_id) => {
-            sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM repositories
-             WHERE github_repo_id = $1 AND tracking_enabled AND deleted_at IS NULL",
-            )
-            .bind(github_repo_id)
-            .fetch_optional(&state.db)
-            .await?
-        }
+    let context = match delivery.github_repo_id {
+        Some(github_repo_id) => fetch_repo_context(state, github_repo_id).await?,
         None => None,
     };
-    let Some(repository_id) = repository_id else {
+    let Some(context) = context else {
         sqlx::query(
             "UPDATE webhook_deliveries
              SET status = 'ignored', processed_at = now(),
@@ -217,15 +216,27 @@ async fn apply_delivery(state: &AppState, delivery: &Delivery) -> Result<(), App
     };
 
     let mut transaction = state.db.begin().await?;
-    let applied = match delivery.event_type.as_str() {
-        "push" => apply_push(&mut transaction, repository_id, &delivery.payload).await?,
+    let mut outcome = Outcome::ignored();
+    match delivery.event_type.as_str() {
+        "push" => {
+            outcome.applied = apply_push(&mut transaction, context.id, &delivery.payload).await?
+        }
         "pull_request" => {
-            apply_pull_request(&mut transaction, repository_id, &delivery.payload).await?
+            outcome.applied =
+                apply_pull_request(&mut transaction, context.id, &delivery.payload).await?
         }
         "pull_request_review" => {
-            apply_pull_request_review(&mut transaction, repository_id, &delivery.payload).await?
+            outcome.applied =
+                apply_pull_request_review(&mut transaction, context.id, &delivery.payload).await?
         }
-        _ => false,
+        "workflow_run" => {
+            outcome = apply_workflow_run(&mut transaction, &context, &delivery.payload).await?
+        }
+        "workflow_job" => {
+            outcome.applied =
+                apply_workflow_job(&mut transaction, context.id, &delivery.payload).await?
+        }
+        _ => {}
     };
     sqlx::query(
         "UPDATE webhook_deliveries
@@ -233,12 +244,213 @@ async fn apply_delivery(state: &AppState, delivery: &Delivery) -> Result<(), App
          WHERE id = $1",
     )
     .bind(delivery.id)
-    .bind(repository_id)
-    .bind(if applied { "processed" } else { "ignored" })
-    .bind((!applied).then_some("event type or action is not handled in Phase 3"))
+    .bind(context.id)
+    .bind(if outcome.applied {
+        "processed"
+    } else {
+        "ignored"
+    })
+    .bind((!outcome.applied).then_some("event type or action is not handled in Phase 4"))
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
+
+    // Post-commit, best-effort: pull the completed run's logs into MinIO. Its
+    // own task, so a slow multi-megabyte download never holds up the queue, and
+    // its failure never un-does the facts that were just committed.
+    if let Some(capture) = outcome.log_capture {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = store_run_logs(&state, capture).await {
+                warn!(error = ?error, "workflow log capture failed");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// What `apply_delivery` needs to know about the tracked repository a delivery
+/// belongs to: its id (for FKs), its owning org (for event envelopes), its
+/// default branch (to stamp `is_default_branch`), and its `owner/name` (to call
+/// GitHub for logs).
+struct RepoContext {
+    id: Uuid,
+    organization_id: Uuid,
+    default_branch: String,
+    owner_login: String,
+    name: String,
+}
+
+async fn fetch_repo_context(
+    state: &AppState,
+    github_repo_id: i64,
+) -> Result<Option<RepoContext>, AppError> {
+    let row = sqlx::query(
+        "SELECT id, organization_id, default_branch, owner_login, name
+         FROM repositories
+         WHERE github_repo_id = $1 AND tracking_enabled AND deleted_at IS NULL",
+    )
+    .bind(github_repo_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    Ok(Some(RepoContext {
+        id: row.try_get("id")?,
+        organization_id: row.try_get("organization_id")?,
+        default_branch: row.try_get("default_branch")?,
+        owner_login: row.try_get("owner_login")?,
+        name: row.try_get("name")?,
+    }))
+}
+
+/// The result of applying one delivery: whether it changed anything, and an
+/// optional request to fetch logs after the transaction commits.
+struct Outcome {
+    applied: bool,
+    log_capture: Option<LogCapture>,
+}
+
+impl Outcome {
+    fn ignored() -> Self {
+        Self {
+            applied: false,
+            log_capture: None,
+        }
+    }
+}
+
+struct LogCapture {
+    repository_id: Uuid,
+    workflow_run_id: Uuid,
+    owner: String,
+    name: String,
+    github_run_id: i64,
+    run_attempt: i32,
+}
+
+async fn apply_workflow_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &RepoContext,
+    payload: &Value,
+) -> Result<Outcome, AppError> {
+    let run = serde_json::from_value::<GitHubWorkflowRun>(
+        payload
+            .get("workflow_run")
+            .cloned()
+            .ok_or_else(|| AppError::bad_request("workflow_run payload is missing the run"))?,
+    )?;
+    // The workflow object rides along on the webhook; the backfill supplies it
+    // separately. Absence is fine — the run's workflow_id FK is nullable.
+    let workflow = payload
+        .get("workflow")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<GitHubWorkflow>(value).ok());
+
+    let workflow_run_id = workflow_ingest::ingest_workflow_run(
+        transaction,
+        context.id,
+        context.organization_id,
+        &context.default_branch,
+        &run,
+        workflow.as_ref(),
+    )
+    .await?;
+
+    // Capture logs only for completed runs, and only if we do not already hold
+    // them, so a duplicate completion webhook does not re-download.
+    let log_capture = if run.status == "completed" {
+        let already = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM build_logs
+             WHERE workflow_run_id = $1 AND workflow_job_id IS NULL)",
+        )
+        .bind(workflow_run_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        (!already).then(|| LogCapture {
+            repository_id: context.id,
+            workflow_run_id,
+            owner: context.owner_login.clone(),
+            name: context.name.clone(),
+            github_run_id: run.id,
+            run_attempt: run.run_attempt,
+        })
+    } else {
+        None
+    };
+
+    Ok(Outcome {
+        applied: true,
+        log_capture,
+    })
+}
+
+async fn apply_workflow_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: Uuid,
+    payload: &Value,
+) -> Result<bool, AppError> {
+    let job = serde_json::from_value::<GitHubJob>(
+        payload
+            .get("workflow_job")
+            .cloned()
+            .ok_or_else(|| AppError::bad_request("workflow_job payload is missing the job"))?,
+    )?;
+    workflow_ingest::ingest_workflow_job(transaction, repository_id, &job).await
+}
+
+/// Downloads a run's log archive and records its `build_logs` metadata row.
+/// Best-effort: any failure here is logged and dropped, never surfaced to the
+/// delivery, because the facts are already committed and logs are re-fetchable.
+async fn store_run_logs(state: &AppState, capture: LogCapture) -> Result<(), AppError> {
+    let Some(token) = github_api::repository_token(state, capture.repository_id).await? else {
+        info!(
+            repository_id = %capture.repository_id,
+            "no usable GitHub token for log capture; skipping"
+        );
+        return Ok(());
+    };
+    let api = GitHubApi::new(state, &token);
+    let Some(bytes) = api
+        .run_logs_zip(&capture.owner, &capture.name, capture.github_run_id)
+        .await?
+    else {
+        return Ok(());
+    };
+
+    let object_key = format!(
+        "logs/{}/{}/attempt-{}/run.zip",
+        capture.repository_id, capture.github_run_id, capture.run_attempt
+    );
+    if let Err(error) = state
+        .log_store
+        .put(&object_key, &bytes, "application/zip")
+        .await
+    {
+        warn!(%object_key, error, "log upload to object storage failed");
+        return Ok(());
+    }
+
+    let digest = Sha256::digest(&bytes).to_vec();
+    sqlx::query(
+        "INSERT INTO build_logs
+            (repository_id, workflow_run_id, storage_bucket, object_key, size_bytes,
+             content_type, sha256)
+         VALUES ($1, $2, $3, $4, $5, 'application/zip', $6)
+         ON CONFLICT (object_key) DO UPDATE SET
+             size_bytes = EXCLUDED.size_bytes,
+             sha256 = EXCLUDED.sha256",
+    )
+    .bind(capture.repository_id)
+    .bind(capture.workflow_run_id)
+    .bind(state.log_store.bucket_name())
+    .bind(&object_key)
+    .bind(bytes.len() as i64)
+    .bind(&digest)
+    .execute(&state.db)
+    .await?;
+    info!(%object_key, size = bytes.len(), "captured workflow run logs");
     Ok(())
 }
 

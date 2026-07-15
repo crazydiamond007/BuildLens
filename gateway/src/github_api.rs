@@ -33,6 +33,41 @@ pub async fn access_token(state: &AppState, user_id: Uuid) -> Result<String, App
         .map_err(AppError::from)
 }
 
+/// Finds a usable GitHub token to act on a repository outside a user request —
+/// specifically, the webhook-triggered log capture, which has no session. Picks
+/// any organization member with a connected, unexpired GitHub account. This is a
+/// deliberate simplification for a portfolio project: a production system would
+/// use a GitHub App installation token scoped to the repository rather than
+/// borrowing a member's credential. Returns `None` when no member has a valid
+/// token, which the caller treats as "skip logs".
+pub async fn repository_token(
+    state: &AppState,
+    repository_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    let row = sqlx::query(
+        "SELECT ga.access_token_encrypted
+         FROM github_accounts ga
+         JOIN organization_members m ON m.user_id = ga.user_id
+         JOIN repositories r ON r.organization_id = m.organization_id
+         JOIN users u ON u.id = ga.user_id
+         WHERE r.id = $1
+           AND u.is_active AND u.deleted_at IS NULL
+           AND (ga.token_expires_at IS NULL OR ga.token_expires_at > now())
+         ORDER BY CASE m.role
+                    WHEN 'owner' THEN 0 WHEN 'admin' THEN 1
+                    WHEN 'member' THEN 2 ELSE 3 END
+         LIMIT 1",
+    )
+    .bind(repository_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let ciphertext: Vec<u8> = row.try_get("access_token_encrypted")?;
+    Ok(Some(state.token_cipher.decrypt(&ciphertext)?))
+}
+
 pub struct GitHubApi<'a> {
     state: &'a AppState,
     token: &'a str,
@@ -71,7 +106,31 @@ impl<'a> GitHubApi<'a> {
         self.get(url).await
     }
 
+    /// A page of a list endpoint that returns a bare JSON array (`/branches`,
+    /// `/commits`, `/pulls`). Delegates to `page_envelope`, which does the
+    /// conditional-request and pagination work.
     pub async fn page<T>(&self, url: Url, etag: Option<&str>) -> Result<GitHubPage<T>, AppError>
+    where
+        T: DeserializeOwned,
+    {
+        let envelope = self.page_envelope::<Vec<T>>(url, etag).await?;
+        Ok(GitHubPage {
+            items: envelope.body.unwrap_or_default(),
+            next: envelope.next,
+            etag: envelope.etag,
+            not_modified: envelope.not_modified,
+        })
+    }
+
+    /// A page whose body is an arbitrary shape. The Actions endpoints
+    /// (`/actions/runs`, `/actions/runs/{id}/jobs`) wrap their array in an
+    /// object with a `total_count`, so they deserialize to a wrapper struct
+    /// rather than a `Vec`. `body` is `None` on a `304 Not Modified`.
+    pub async fn page_envelope<T>(
+        &self,
+        url: Url,
+        etag: Option<&str>,
+    ) -> Result<GitHubEnvelope<T>, AppError>
     where
         T: DeserializeOwned,
     {
@@ -86,8 +145,8 @@ impl<'a> GitHubApi<'a> {
         let status = response.status();
         let headers = response.headers().clone();
         if status == StatusCode::NOT_MODIFIED {
-            return Ok(GitHubPage {
-                items: Vec::new(),
+            return Ok(GitHubEnvelope {
+                body: None,
                 next: None,
                 etag: header_text(&headers, header::ETAG),
                 not_modified: true,
@@ -98,16 +157,89 @@ impl<'a> GitHubApi<'a> {
         }
         let next = header_text(&headers, header::LINK).and_then(|link| next_link(&link));
         let etag = header_text(&headers, header::ETAG);
-        let items = response
-            .json::<Vec<T>>()
+        let body = response
+            .json::<T>()
             .await
             .map_err(|error| AppError::Upstream(format!("invalid response from {url}: {error}")))?;
-        Ok(GitHubPage {
-            items,
+        Ok(GitHubEnvelope {
+            body: Some(body),
             next,
             etag,
             not_modified: false,
         })
+    }
+
+    /// All jobs (with their steps) for one run attempt. Usually a handful, so
+    /// pagination rarely fires, but it is honoured for the monorepo case.
+    pub async fn run_jobs(
+        &self,
+        owner: &str,
+        repository: &str,
+        run_id: i64,
+    ) -> Result<Vec<GitHubJob>, AppError> {
+        let mut url = self.endpoint(&[
+            "repos",
+            owner,
+            repository,
+            "actions",
+            "runs",
+            &run_id.to_string(),
+            "jobs",
+        ])?;
+        url.query_pairs_mut()
+            .append_pair("filter", "latest")
+            .append_pair("per_page", "100");
+        let mut jobs = Vec::new();
+        loop {
+            let page = self.page_envelope::<GitHubJobsPage>(url, None).await?;
+            if let Some(body) = page.body {
+                jobs.extend(body.jobs);
+            }
+            match page.next {
+                Some(next) => url = next,
+                None => return Ok(jobs),
+            }
+        }
+    }
+
+    /// Downloads the zipped logs for a run. The endpoint answers `302` to a
+    /// short-lived storage URL on a different host; reqwest follows it and drops
+    /// the `Authorization` header on the host change, which is exactly what the
+    /// signed URL wants. Returns `None` when logs are absent (run still going,
+    /// or expired) rather than treating it as an error — logs are best-effort.
+    pub async fn run_logs_zip(
+        &self,
+        owner: &str,
+        repository: &str,
+        run_id: i64,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let url = self.endpoint(&[
+            "repos",
+            owner,
+            repository,
+            "actions",
+            "runs",
+            &run_id.to_string(),
+            "logs",
+        ])?;
+        let response = self
+            .request(self.state.http.get(url))
+            .send()
+            .await
+            .map_err(|error| AppError::Upstream(error.to_string()))?;
+        if response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::GONE {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            return Err(api_error(status, &headers, response.text().await.ok()));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| AppError::Upstream(error.to_string()))?;
+        Ok(Some(bytes.to_vec()))
     }
 
     pub async fn first_review_at(
@@ -157,7 +289,14 @@ impl<'a> GitHubApi<'a> {
                 .request(self.state.http.patch(url))
                 .json(&UpdateWebhook {
                     active: true,
-                    events: &["push", "pull_request", "pull_request_review"],
+                    events: &[
+                        "push",
+                        "pull_request",
+                        "pull_request_review",
+                        "workflow_run",
+                        "workflow_job",
+                        "deployment_status",
+                    ],
                     config: CreateWebhookConfig {
                         url: callback,
                         content_type: "json",
@@ -181,7 +320,14 @@ impl<'a> GitHubApi<'a> {
             .json(&CreateWebhook {
                 name: "web",
                 active: true,
-                events: &["push", "pull_request", "pull_request_review"],
+                events: &[
+                    "push",
+                    "pull_request",
+                    "pull_request_review",
+                    "workflow_run",
+                    "workflow_job",
+                    "deployment_status",
+                ],
                 config: CreateWebhookConfig {
                     url: callback,
                     content_type: "json",
@@ -273,6 +419,107 @@ pub struct GitHubPage<T> {
     pub next: Option<Url>,
     pub etag: Option<String>,
     pub not_modified: bool,
+}
+
+pub struct GitHubEnvelope<T> {
+    pub body: Option<T>,
+    pub next: Option<Url>,
+    pub etag: Option<String>,
+    pub not_modified: bool,
+}
+
+/// The `workflow_run` object, shared by the REST list endpoint and the
+/// `workflow_run` webhook — they carry the same shape. There is no
+/// `completed_at`; when `status == "completed"` the run's `updated_at` is the
+/// completion time, which is how the ingest maps it.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GitHubWorkflowRun {
+    pub id: i64,
+    pub name: Option<String>,
+    pub workflow_id: i64,
+    pub run_number: i32,
+    #[serde(default = "one")]
+    pub run_attempt: i32,
+    pub event: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub head_sha: String,
+    pub head_branch: Option<String>,
+    pub actor: Option<GitHubUserSummary>,
+    pub triggering_actor: Option<GitHubUserSummary>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub run_started_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub pull_requests: Vec<GitHubRunPullRequest>,
+}
+
+fn one() -> i32 {
+    1
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GitHubRunPullRequest {
+    pub number: i32,
+}
+
+/// The `workflow` object nested in a `workflow_run` webhook and returned by the
+/// workflows REST endpoint. Enough to upsert the `workflows` row a run points at.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GitHubWorkflow {
+    pub id: i64,
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GitHubRunsPage {
+    #[serde(default)]
+    pub workflow_runs: Vec<GitHubWorkflowRun>,
+}
+
+#[derive(Deserialize)]
+pub struct GitHubWorkflowsPage {
+    #[serde(default)]
+    pub workflows: Vec<GitHubWorkflow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GitHubJob {
+    pub id: i64,
+    pub run_id: i64,
+    #[serde(default = "one")]
+    pub run_attempt: i32,
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub runner_id: Option<i64>,
+    pub runner_name: Option<String>,
+    pub runner_group_name: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub steps: Vec<GitHubStep>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GitHubStep {
+    pub number: i32,
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+pub struct GitHubJobsPage {
+    #[serde(default)]
+    pub jobs: Vec<GitHubJob>,
 }
 
 fn api_error(

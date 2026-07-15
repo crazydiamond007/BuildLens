@@ -3,13 +3,17 @@ mod auth;
 mod config;
 mod crypto;
 mod error;
+mod events;
 mod github;
 mod github_api;
+mod logs;
+mod relay;
 mod repository_sync;
 mod routes;
 mod sessions;
 mod state;
 mod webhooks;
+mod workflow_ingest;
 
 use std::process::ExitCode;
 
@@ -55,7 +59,14 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::connect(config).await?;
     let listener = TcpListener::bind(bind_addr).await?;
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-    let processor = tokio::spawn(webhooks::run_processor(state.clone(), shutdown_receiver));
+    let processor = tokio::spawn(webhooks::run_processor(
+        state.clone(),
+        shutdown_receiver.clone(),
+    ));
+    // The outbox relay: drains event_outbox to RabbitMQ. It runs in-process for
+    // now; extracting it into its own binary later is a deployment change, not a
+    // code change, because it only touches Postgres and RabbitMQ.
+    let relay = tokio::spawn(relay::run(state.clone(), shutdown_receiver));
 
     info!(%bind_addr, %environment, "buildlens gateway listening");
 
@@ -71,6 +82,7 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     .await;
     let _ = shutdown_sender.send(true);
     processor.await?;
+    relay.await?;
     server_result?;
 
     info!("shutdown complete");
