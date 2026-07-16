@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use config::{Config, Environment};
 use state::AppState;
 use tokio::{net::TcpListener, signal, sync::watch};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[tokio::main]
@@ -44,6 +44,19 @@ async fn main() -> ExitCode {
     };
 
     init_tracing(config.environment);
+
+    // Production already refused to start on any of these, so anything here is
+    // a development stack running on published defaults. It still says so: the
+    // whole failure mode is that these values work, so nobody notices them.
+    for weakness in config.weaknesses() {
+        warn!(
+            key = weakness.key,
+            remedy = weakness.remedy,
+            "{} {}",
+            weakness.key,
+            weakness.problem
+        );
+    }
 
     if let Err(e) = run(config).await {
         error!(error = %e, "gateway failed to start");

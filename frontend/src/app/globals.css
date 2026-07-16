@@ -239,6 +239,14 @@ td small { display: block; margin-top: 3px; color: var(--fg-2); font-size: 10.5p
 .loginPanel > h1 { max-width: 590px; margin: 12px 0 18px; font-size: clamp(42px, 6vw, 72px); line-height: 0.98; letter-spacing: -0.055em; }
 .loginCopy { max-width: 520px; margin: 0 0 28px; color: var(--fg-1); font-size: 16px; line-height: 1.6; }
 .loginNotice { max-width: 520px; margin: -8px 0 22px; padding: 10px 13px; border: 1px solid color-mix(in oklab, var(--warning) 38%, var(--border)); border-radius: 8px; background: color-mix(in oklab, var(--warning) 8%, var(--bg-1)); color: var(--fg-0); font-size: 13px; line-height: 1.5; }
+.scopeDisclosure { max-width: 520px; margin: 0 0 26px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-1); }
+.scopeIntro { margin: 0 0 12px; color: var(--fg-1); font-size: 13px; font-weight: 500; }
+.scopeList { display: flex; flex-direction: column; gap: 11px; margin: 0; padding: 0; list-style: none; }
+.scopeList li { display: flex; flex-direction: column; gap: 5px; }
+.scopeKeys { display: flex; flex-wrap: wrap; gap: 5px; }
+.scopeList code { padding: 2px 6px; border-radius: 5px; background: var(--bg-2); color: var(--fg-0); font-family: "JetBrains Mono Variable", monospace; font-size: 11px; }
+.scopeList span { color: var(--fg-2); font-size: 12px; line-height: 1.55; }
+.scopeNote { margin: 14px 0 0; padding-top: 13px; border-top: 1px solid var(--border); color: var(--fg-2); font-size: 12px; line-height: 1.55; }
 .loginPanel > .primaryButton { align-self: flex-start; min-width: 175px; }
 .loginFeatures { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 80px; color: var(--fg-2); font-family: "JetBrains Mono Variable", monospace; font-size: 10px; text-transform: uppercase; }
 .loginVisual { position: relative; overflow: hidden; background: var(--bg-1); border-left: 1px solid var(--border); }

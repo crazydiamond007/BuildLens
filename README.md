@@ -203,6 +203,22 @@ point at the compose services and need no changes for local dev):
 | `ANTHROPIC_API_KEY` | An Anthropic API key, for the Phase 6 AI worker. |
 | `AI_MANUAL_TRIGGER_TOKEN` | A random 32+ char token (`openssl rand -hex 32`) protecting the manual retry endpoint. |
 
+The gateway checks these at startup. Leave the placeholders in place and
+`ENVIRONMENT=development` logs a warning per value but still boots, so you can
+bring the stack up before you have an OAuth app. With `ENVIRONMENT=production` the
+same values refuse to start, and the error names every one of them at once:
+
+```
+configuration error: refusing to start in production:
+  TOKEN_ENCRYPTION_KEY is the all-zero default from .env.example
+    Generate one: openssl rand -base64 32 - and keep it, because changing it
+    makes already stored GitHub tokens unreadable.
+```
+
+That default matters more than it looks. It is a real, working key published in
+this repository, so a deployment that keeps it is encrypting every stored GitHub
+token with a key anyone can read.
+
 ### 2. Start the infrastructure
 
 ```bash
@@ -246,38 +262,42 @@ curl localhost:8082/health/ready     # AI worker: postgres + rabbitmq
 > scheduled digests are **disabled by default**; only a failed run triggers a
 > paid model call, and a monthly cost cap (default **$10**) bounds it.
 
-### 5. Log in with GitHub
+### 5. Sign in with GitHub
 
-Open **http://localhost:8080/auth/github/login** in a browser and approve. This
-completes the OAuth round-trip, stores your GitHub token (AES-GCM encrypted),
-creates your personal organization, and sets the `buildlens_session` cookie.
+Open **http://localhost:3000** and press **Continue with GitHub**. There is no
+sign-up form and no password: GitHub supplies your name, email, and avatar, and
+BuildLens creates your personal workspace on first sign-in.
 
-To make the API calls below, you need your organization id and the session
-cookie: open **http://localhost:8080/me** in the same browser to read the org
-`id`, and copy the `buildlens_session` cookie value from your browser dev tools.
+The page lists the scopes before it sends you to GitHub. The one worth
+understanding is `repo`, which is broad - it covers reading Actions logs and
+registering a webhook on private repositories, and GitHub's OAuth scopes offer
+nothing narrower that can do both. BuildLens never pushes code or changes
+workflows, and your access token is encrypted (AES-GCM) before storage and never
+reaches the browser. Approving lands you back on the dashboard with the
+`buildlens_session` cookie set.
 
-### 6. Discover and track a repository
+### 6. Track a repository
 
-List what you can see (session-only):
+Go to **Settings → Repository tracking** in the sidebar. Every repository your
+GitHub account can see is listed; press **Track** on one.
 
-```
-http://localhost:8080/github/repositories
-```
+Tracking needs the BuildLens `admin` role (your personal-workspace owner
+qualifies) **and** GitHub admin permission on the repository, because BuildLens
+registers the webhook for you. Repositories you lack admin on, and repositories
+another workspace already claimed, say so in place rather than failing on click.
 
-Copy the numeric `id` of a repo, then track it. This requires the BuildLens
-`admin` role (your personal-org owner qualifies) **and** GitHub repository admin
-permission, because BuildLens registers the webhook for you. It also queues the
-initial backfill.
+Pressing Track registers the webhook and queues the initial backfill, which walks
+branches → commits → pull requests → workflows → workflow runs (with their jobs
+and steps), checkpointing each page so an interrupted backfill resumes rather
+than restarting.
 
-```bash
-curl -X PUT \
-  --cookie "buildlens_session=<COOKIE>" \
-  http://localhost:8080/organizations/<ORG_ID>/github-repositories/<GITHUB_REPO_ID>/tracking
-```
+> Not seeing a repository you own? If it belongs to a GitHub organization, that
+> organization has to approve the OAuth app first (its **Settings → Third-party
+> access**). Until then GitHub hides it from the API and BuildLens cannot know it
+> exists.
 
-The backfill walks branches → commits → pull requests → workflows → workflow runs
-(with their jobs and steps), checkpointing each page so a failed run resumes when
-you repeat the call.
+The equivalent API calls, if you would rather script it, are in
+[Using the API](#using-the-api) below.
 
 ### 7. Trigger a run and watch it flow
 

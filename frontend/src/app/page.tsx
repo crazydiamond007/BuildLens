@@ -28,6 +28,36 @@ export default async function Home({
   return me ? <LoginState signedIn email={me.email} notice={notice} /> : <LoginState notice={notice} />;
 }
 
+// The consent screen GitHub shows next is the first hard question BuildLens
+// asks, and `repo` is a broad answer to it. Someone deciding whether to grant it
+// deserves the reasoning before the redirect, not after: the scopes are listed
+// here in the same order and wording GitHub will use, including the part that is
+// awkward to admit. Kept in sync with OAUTH_SCOPES in gateway/src/github.rs.
+function ScopeDisclosure() {
+  return (
+    <div className="scopeDisclosure">
+      <p className="scopeIntro">BuildLens will ask GitHub for:</p>
+      <ul className="scopeList">
+        <li>
+          <div className="scopeKeys"><code>read:user</code><code>user:email</code></div>
+          <span>Your name, avatar, and verified email address. This becomes your BuildLens account and your personal workspace.</span>
+        </li>
+        <li>
+          <div className="scopeKeys"><code>repo</code></div>
+          <span>Read workflow runs, jobs, and logs, and register a webhook on the repositories you choose to track. This scope is broader than BuildLens needs: GitHub does not offer a narrower OAuth scope that can install a webhook or read Actions logs on a private repository.</span>
+        </li>
+        <li>
+          <div className="scopeKeys"><code>read:org</code></div>
+          <span>Which organizations you belong to, so shared workspaces can find you.</span>
+        </li>
+      </ul>
+      <p className="scopeNote">
+        BuildLens never pushes code, opens pull requests, or changes your workflows. Your access token is encrypted before storage and never reaches the browser. No repository is tracked until you pick one.
+      </p>
+    </div>
+  );
+}
+
 function LoginState({ signedIn = false, email, notice }: { signedIn?: boolean; email?: string; notice?: string | null }) {
   return (
     <main className="loginPage">
@@ -40,7 +70,10 @@ function LoginState({ signedIn = false, email, notice }: { signedIn?: boolean; e
         {signedIn ? (
           <div className="emptyState"><h3>No organization access</h3><p>{email} is signed in, but has no active BuildLens membership.</p></div>
         ) : (
-          <Link className="primaryButton" href={githubLoginUrl()}>Continue with GitHub</Link>
+          <>
+            <ScopeDisclosure />
+            <Link className="primaryButton" href={githubLoginUrl()}>Continue with GitHub</Link>
+          </>
         )}
         <div className="loginFeatures"><span>DORA four keys</span><span>Build scoring</span><span>Failure analysis</span></div>
       </section>

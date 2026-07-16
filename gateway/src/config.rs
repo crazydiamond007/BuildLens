@@ -60,6 +60,36 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("{key} is invalid: {message}")]
     Invalid { key: &'static str, message: String },
+    #[error("refusing to start in production:\n{}", render(.0))]
+    Insecure(Vec<Weakness>),
+}
+
+/// A configuration value that parses but must not be trusted.
+///
+/// Kept apart from `ConfigError` because severity is a function of the
+/// environment, not of the value: the all-zero encryption key is exactly what a
+/// throwaway local stack should use, and exactly what must never reach
+/// production. These are reported together rather than one at a time, so a
+/// misconfigured deployment learns everything it has to fix in a single boot
+/// instead of discovering it one restart at a time.
+#[derive(Debug)]
+pub struct Weakness {
+    pub key: &'static str,
+    pub problem: String,
+    pub remedy: &'static str,
+}
+
+fn render(weaknesses: &[Weakness]) -> String {
+    weaknesses
+        .iter()
+        .map(|weakness| {
+            format!(
+                "  {} {}\n    {}",
+                weakness.key, weakness.problem, weakness.remedy
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl Config {
@@ -137,7 +167,7 @@ impl Config {
             logs_bucket: required("S3_LOGS_BUCKET")?,
         };
 
-        Ok(Self {
+        let config = Self {
             environment: parse_optional("ENVIRONMENT")?.unwrap_or(Environment::Development),
             bind_addr,
             database_url: required("DATABASE_URL")?,
@@ -155,7 +185,89 @@ impl Config {
             session_ttl: Duration::from_secs(session_ttl_seconds),
             rabbitmq_url: required("RABBITMQ_URL")?,
             s3,
-        })
+        };
+
+        // Development is allowed to run with placeholders - that is what they
+        // are for - but `main` says so on every boot rather than staying quiet.
+        // Production gets no such latitude.
+        if config.environment == Environment::Production {
+            let weaknesses = config.weaknesses();
+            if !weaknesses.is_empty() {
+                return Err(ConfigError::Insecure(weaknesses));
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Values that parse cleanly but leave the deployment insecure.
+    ///
+    /// Nothing above rejects them, which is what makes them dangerous: the
+    /// all-zero encryption key works perfectly, so a self-hosted BuildLens can
+    /// protect every stored GitHub token with a key published in
+    /// `.env.example` and never see a single symptom.
+    ///
+    /// `main` calls this again after tracing is initialised, so the checks stay
+    /// free of logging and the warnings reach the same subscriber as everything
+    /// else.
+    pub fn weaknesses(&self) -> Vec<Weakness> {
+        let mut found = Vec::new();
+
+        for (key, value) in [
+            ("GITHUB_CLIENT_ID", &self.github_client_id),
+            ("GITHUB_CLIENT_SECRET", &self.github_client_secret),
+            ("GITHUB_WEBHOOK_SECRET", &self.github_webhook_secret),
+        ] {
+            // The webhook placeholder is 40 characters, so it satisfies the
+            // length rule above and is otherwise indistinguishable from a real
+            // secret.
+            if value.starts_with(PLACEHOLDER_PREFIX) {
+                found.push(Weakness {
+                    key,
+                    problem: "is still the .env.example placeholder".to_string(),
+                    remedy: "Set the real value; GitHub sign-in cannot work until you do.",
+                });
+            }
+        }
+
+        if self.token_encryption_key == [0u8; 32] {
+            found.push(Weakness {
+                key: "TOKEN_ENCRYPTION_KEY",
+                problem: "is the all-zero default from .env.example".to_string(),
+                remedy: "Generate one: openssl rand -base64 32 - and keep it, because \
+                         changing it makes already stored GitHub tokens unreadable.",
+            });
+        }
+
+        // Only meaningful once the browser is somewhere other than localhost, and
+        // in production it is also self-enforcing: the session cookie carries
+        // `Secure` there, so an http origin cannot hold a session at all.
+        if self.environment == Environment::Production {
+            for (key, url) in [
+                ("FRONTEND_URL", self.frontend_url.scheme()),
+                ("GITHUB_REDIRECT_URI", scheme_of(&self.github_redirect_uri)),
+            ] {
+                if url != "https" {
+                    found.push(Weakness {
+                        key,
+                        problem: "is not https".to_string(),
+                        remedy: "Production sets Secure on the session cookie, so sign-in \
+                                 silently fails over plain http.",
+                    });
+                }
+            }
+        }
+
+        found
+    }
+}
+
+const PLACEHOLDER_PREFIX: &str = "replace_with";
+
+fn scheme_of(raw: &str) -> &str {
+    match raw.split_once("://") {
+        Some((scheme, _)) => scheme,
+        None => "",
     }
 }
 
@@ -234,5 +346,89 @@ impl fmt::Display for Environment {
             Self::Development => write!(f, "development"),
             Self::Production => write!(f, "production"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A production config with nothing wrong with it. Each test breaks exactly
+    /// one thing, so a failure names the check that stopped working.
+    fn secure_production() -> Config {
+        Config {
+            environment: Environment::Production,
+            bind_addr: "0.0.0.0:8080".parse().unwrap(),
+            database_url: "postgres://user:pass@db/buildlens".to_string(),
+            database_max_connections: 10,
+            database_connect_timeout: Duration::from_secs(5),
+            redis_url: "redis://redis:6379".to_string(),
+            github_client_id: "Iv1.a1b2c3d4e5f6".to_string(),
+            github_client_secret: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            github_redirect_uri: "https://buildlens.example/auth/github/callback".to_string(),
+            frontend_url: Url::parse("https://buildlens.example").unwrap(),
+            github_api_base_url: Url::parse("https://api.github.com/").unwrap(),
+            github_webhook_url: Url::parse("https://buildlens.example/webhooks/github").unwrap(),
+            github_webhook_secret: "d1a0f3c8b7e6549201fedcba9876543210abcdef".to_string(),
+            token_encryption_key: [7u8; 32],
+            session_ttl: Duration::from_secs(604_800),
+            rabbitmq_url: "amqp://user:pass@rabbit/buildlens".to_string(),
+            s3: S3Config {
+                endpoint: Url::parse("https://s3.example").unwrap(),
+                region: "us-east-1".to_string(),
+                access_key: "access".to_string(),
+                secret_key: "secret".to_string(),
+                logs_bucket: "buildlens-logs".to_string(),
+            },
+        }
+    }
+
+    fn keys(config: &Config) -> Vec<&'static str> {
+        config.weaknesses().into_iter().map(|w| w.key).collect()
+    }
+
+    #[test]
+    fn a_properly_configured_production_deployment_has_no_weaknesses() {
+        assert!(secure_production().weaknesses().is_empty());
+    }
+
+    #[test]
+    fn the_published_all_zero_encryption_key_is_rejected() {
+        let mut config = secure_production();
+        config.token_encryption_key = [0u8; 32];
+        assert_eq!(keys(&config), ["TOKEN_ENCRYPTION_KEY"]);
+    }
+
+    /// The placeholder is 40 characters, so the length rule in `from_env` passes
+    /// it. Nothing but this check stands between it and a production webhook.
+    #[test]
+    fn the_webhook_placeholder_is_caught_despite_being_long_enough() {
+        let mut config = secure_production();
+        config.github_webhook_secret = "replace_with_at_least_32_random_characters".to_string();
+        assert!(config.github_webhook_secret.len() >= 32);
+        assert_eq!(keys(&config), ["GITHUB_WEBHOOK_SECRET"]);
+    }
+
+    #[test]
+    fn plain_http_origins_are_only_a_problem_in_production() {
+        let mut config = secure_production();
+        config.frontend_url = Url::parse("http://localhost:3000").unwrap();
+        config.github_redirect_uri = "http://localhost:8080/auth/github/callback".to_string();
+        assert_eq!(keys(&config), ["FRONTEND_URL", "GITHUB_REDIRECT_URI"]);
+
+        config.environment = Environment::Development;
+        assert!(config.weaknesses().is_empty());
+    }
+
+    #[test]
+    fn every_problem_is_reported_in_one_pass() {
+        let mut config = secure_production();
+        config.github_client_id = "replace_with_github_oauth_client_id".to_string();
+        config.token_encryption_key = [0u8; 32];
+        config.frontend_url = Url::parse("http://buildlens.example").unwrap();
+        assert_eq!(
+            keys(&config),
+            ["GITHUB_CLIENT_ID", "TOKEN_ENCRYPTION_KEY", "FRONTEND_URL"]
+        );
     }
 }
