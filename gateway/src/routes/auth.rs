@@ -1,15 +1,15 @@
 use axum::{
     extract::{Query, State},
-    http::{HeaderMap, HeaderValue, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     audit::{self, AuditContext},
-    auth::Principal,
     crypto::random_urlsafe,
     error::AppError,
     github::{self, GitHubUser, OAuthToken},
@@ -31,24 +31,29 @@ pub async fn github_callback(
     context: AuditContext,
     Query(query): Query<CallbackQuery>,
 ) -> Result<Response, AppError> {
-    let csrf_state = query
-        .state
-        .as_deref()
-        .ok_or_else(|| AppError::bad_request("OAuth state is missing"))?;
+    // Everything up to the code exchange is a failure the person can see and act
+    // on, so it goes back to the sign-in page rather than rendering JSON on an
+    // origin that has no way back into the app. The state is still checked
+    // before the reported error, so a forged callback cannot spoof one.
+    let Some(csrf_state) = query.state.as_deref() else {
+        return Ok(sign_in_redirect(&state, SignInError::InvalidRequest));
+    };
     if !sessions::consume_oauth_state(&state, csrf_state).await? {
-        return Err(AppError::bad_request("OAuth state is invalid or expired"));
+        return Ok(sign_in_redirect(&state, SignInError::ExpiredState));
     }
     if let Some(error) = query.error {
-        return Err(AppError::bad_request(format!(
-            "GitHub authorization failed: {}",
-            query.error_description.unwrap_or(error)
-        )));
+        // GitHub's own wording is worth keeping, but in the log rather than the
+        // redirect: it is free text from upstream, and the browser follows it.
+        warn!(
+            error = %error,
+            description = ?query.error_description,
+            "GitHub authorization was refused"
+        );
+        return Ok(sign_in_redirect(&state, SignInError::from_github(&error)));
     }
-
-    let code = query
-        .code
-        .as_deref()
-        .ok_or_else(|| AppError::bad_request("OAuth code is missing"))?;
+    let Some(code) = query.code.as_deref() else {
+        return Ok(sign_in_redirect(&state, SignInError::InvalidRequest));
+    };
     let token = github::exchange_code(&state, code).await?;
     let github_user = github::fetch_user(&state, &token.access_token).await?;
     let user = persist_identity(&state, &context, github_user, token).await?;
@@ -67,29 +72,35 @@ pub async fn github_callback(
     Ok((headers, Redirect::to(state.config.frontend_url.as_str())).into_response())
 }
 
+/// Idempotent, and deliberately so. A caller whose session already expired, or
+/// who never had one, still gets the clearing cookie back: rejecting them would
+/// strand a dead cookie in a browser that has no other way to shed it. The
+/// frontend owns the navigation afterwards, so this answers with no content
+/// rather than a redirect.
 pub async fn logout(
     State(state): State<AppState>,
-    principal: Principal,
     context: AuditContext,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    principal.require_session()?;
-    let token = sessions::from_headers(&headers).ok_or(AppError::Unauthorized)?;
-    sessions::delete(&state, token).await?;
-
-    let mut transaction = state.db.begin().await?;
-    audit::write(
-        &mut transaction,
-        &principal,
-        &context,
-        None,
-        "auth.logged_out",
-        Some("user"),
-        Some(principal.user_id),
-        json!({}),
-    )
-    .await?;
-    transaction.commit().await?;
+    if let Some(token) = sessions::from_headers(&headers)
+        && let Some(user_id) = sessions::delete(&state, token).await?
+    {
+        let mut transaction = state.db.begin().await?;
+        audit::write_actor(
+            &mut transaction,
+            "user",
+            Some(user_id),
+            None,
+            &context,
+            None,
+            "auth.logged_out",
+            Some("user"),
+            Some(user_id),
+            json!({}),
+        )
+        .await?;
+        transaction.commit().await?;
+    }
 
     let cookie = sessions::clear_cookie(state.config.environment);
     let mut response_headers = HeaderMap::new();
@@ -97,11 +108,41 @@ pub async fn logout(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).map_err(AppError::internal)?,
     );
-    Ok((
-        response_headers,
-        Redirect::to(state.config.frontend_url.as_str()),
-    )
-        .into_response())
+    Ok((StatusCode::NO_CONTENT, response_headers).into_response())
+}
+
+/// The subset of sign-in failures worth telling someone about. A closed set,
+/// not a passthrough of whatever arrives in the query string: the reason is
+/// reflected into a URL the browser follows, and GitHub is not the only party
+/// that can reach the callback.
+#[derive(Clone, Copy)]
+enum SignInError {
+    AccessDenied,
+    ExpiredState,
+    InvalidRequest,
+}
+
+impl SignInError {
+    fn from_github(error: &str) -> Self {
+        match error {
+            "access_denied" => Self::AccessDenied,
+            _ => Self::InvalidRequest,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AccessDenied => "access_denied",
+            Self::ExpiredState => "expired_state",
+            Self::InvalidRequest => "invalid_request",
+        }
+    }
+}
+
+fn sign_in_redirect(state: &AppState, error: SignInError) -> Response {
+    let mut url = state.config.frontend_url.clone();
+    url.query_pairs_mut().append_pair("error", error.as_str());
+    Redirect::to(url.as_str()).into_response()
 }
 
 async fn persist_identity(

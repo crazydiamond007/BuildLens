@@ -16,8 +16,8 @@ export function PageHeader({ eyebrow, title, description, action }: { eyebrow?: 
   );
 }
 
-export function EmptyState({ title, body }: { title: string; body: string }) {
-  return <div className="emptyState"><span className="emptyGlyph">+</span><h3>{title}</h3><p>{body}</p></div>;
+export function EmptyState({ title, body, action }: { title: string; body: string; action?: React.ReactNode }) {
+  return <div className="emptyState"><span className="emptyGlyph">+</span><h3>{title}</h3><p>{body}</p>{action && <div className="emptyAction">{action}</div>}</div>;
 }
 
 export function StatusPill({ value }: { value: string | null }) {
@@ -83,7 +83,7 @@ export function RunsTable({ runs, organizationId, compact = false }: { runs: Run
 }
 
 export function RepositoryTable({ repositories, organizationId }: { repositories: RepositorySummary[]; organizationId: string }) {
-  if (!repositories.length) return <EmptyState title="No tracked repositories" body="Track a GitHub repository from the gateway API to begin collecting workflow analytics." />;
+  if (!repositories.length) return <EmptyState title="No tracked repositories" body="Pick the GitHub repositories this workspace should watch. BuildLens installs a webhook, backfills recent history, and starts scoring every workflow run." action={<Link className="primaryButton" href={`/organizations/${organizationId}/settings`}>Track a repository</Link>} />;
   return (
     <div className="tableWrap"><table><thead><tr><th>Repository</th><th>Score</th><th>Reliability</th><th>Runs</th><th>Failures</th><th>Flaky</th><th>Recommendations</th><th>Last run</th></tr></thead><tbody>
       {repositories.map((repo) => <tr key={repo.id}>

@@ -1,7 +1,6 @@
 # BuildLens
 
 [![CI](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml/badge.svg)](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml)
-[![Phase](https://img.shields.io/badge/phase-7%20in%20review-d29922.svg)](#project-status)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-000000.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Java](https://img.shields.io/badge/Java-25-ED8B00.svg?logo=openjdk&logoColor=white)](https://openjdk.org)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4-6DB33F.svg?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
@@ -347,8 +346,8 @@ membership mutations require the session cookie.
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | GET | `/auth/github/login` | Start GitHub OAuth |
-| GET | `/auth/github/callback` | Verify OAuth state, connect the account, issue a session, redirect to frontend |
-| GET | `/auth/logout` | Revoke the current Redis session and redirect to frontend |
+| GET | `/auth/github/callback` | Verify OAuth state, connect the account, issue a session, redirect to frontend (or back to sign-in with `?error=` when authorization is refused) |
+| POST | `/auth/logout` | Revoke the current Redis session and clear the cookie. Idempotent, and POST so a cross-site link cannot trigger it |
 | GET | `/me` | Current user and organization memberships |
 | GET, POST | `/organizations` | List or create BuildLens workspaces |
 | GET, POST | `/organizations/{id}/members` | List, add, or change members |

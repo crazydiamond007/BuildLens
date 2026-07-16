@@ -4,13 +4,13 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
+import { signOut } from "@/lib/actions";
 import type { Membership } from "@/lib/types";
 
 type Props = {
   membership: Membership;
   memberships: Membership[];
   user: { name: string | null; email: string; avatarUrl: string | null };
-  logoutUrl: string;
   children: React.ReactNode;
 };
 
@@ -23,7 +23,9 @@ const navItems = [
   ["AI inbox", "ai-inbox", "A"],
 ] as const;
 
-export function AppShell({ membership, memberships, user, logoutUrl, children }: Props) {
+const workspaceItems = [["Repository tracking", "settings", "S"]] as const;
+
+export function AppShell({ membership, memberships, user, children }: Props) {
   const pathname = usePathname();
   const router = useRouter();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -31,6 +33,10 @@ export function AppShell({ membership, memberships, user, logoutUrl, children }:
   const base = `/organizations/${membership.id}`;
   const routes = useMemo(
     () => navItems.map(([label, segment, icon]) => ({ label, icon, href: `${base}/${segment}` })),
+    [base],
+  );
+  const workspaceRoutes = useMemo(
+    () => workspaceItems.map(([label, segment, icon]) => ({ label, icon, href: `${base}/${segment}` })),
     [base],
   );
 
@@ -50,6 +56,21 @@ export function AppShell({ membership, memberships, user, logoutUrl, children }:
     const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
     document.documentElement.dataset.theme = next;
     localStorage.setItem("buildlens-theme", next);
+  }
+
+  function renderLink(route: { label: string; icon: string; href: string }) {
+    const active = pathname === route.href || pathname.startsWith(`${route.href}/`);
+    return (
+      <Link
+        key={route.href}
+        href={route.href}
+        className={active ? "active" : ""}
+        onClick={() => setSidebarOpen(false)}
+      >
+        <span className="navIcon">{route.icon}</span>
+        {route.label}
+      </Link>
+    );
   }
 
   const initials = (user.name ?? user.email)
@@ -80,20 +101,12 @@ export function AppShell({ membership, memberships, user, logoutUrl, children }:
 
         <p className="navLabel">Analytics</p>
         <nav className="navList" aria-label="Primary navigation">
-          {routes.map((route) => {
-            const active = pathname === route.href || pathname.startsWith(`${route.href}/`);
-            return (
-              <Link
-                key={route.href}
-                href={route.href}
-                className={active ? "active" : ""}
-                onClick={() => setSidebarOpen(false)}
-              >
-                <span className="navIcon">{route.icon}</span>
-                {route.label}
-              </Link>
-            );
-          })}
+          {routes.map(renderLink)}
+        </nav>
+
+        <p className="navLabel spaced">Workspace</p>
+        <nav className="navList" aria-label="Workspace navigation">
+          {workspaceRoutes.map(renderLink)}
         </nav>
 
         <div className="sidebarUser">
@@ -124,7 +137,9 @@ export function AppShell({ membership, memberships, user, logoutUrl, children }:
           <span className="topbarContext">{membership.kind} organization</span>
           <div className="topbarActions">
             <button className="iconButton" onClick={toggleTheme} aria-label="Toggle color theme">Theme</button>
-            <a className="iconButton" href={logoutUrl}>Sign out</a>
+            <form action={signOut}>
+              <button className="iconButton" type="submit">Sign out</button>
+            </form>
           </div>
         </header>
         <main className="mainContent">{children}</main>
@@ -135,7 +150,7 @@ export function AppShell({ membership, memberships, user, logoutUrl, children }:
           <div className="commandPalette" role="dialog" aria-modal="true" aria-label="Quick navigation" onMouseDown={(event) => event.stopPropagation()}>
             <div className="commandInput"><span>&gt;</span><span>Quick navigation</span><kbd>esc</kbd></div>
             <p className="navLabel">Navigate</p>
-            {routes.map((route) => (
+            {[...routes, ...workspaceRoutes].map((route) => (
               <button key={route.href} onClick={() => { router.push(route.href); setPaletteOpen(false); }}>
                 <span className="navIcon">{route.icon}</span>{route.label}
               </button>
