@@ -25,6 +25,7 @@ pub struct Config {
     pub github_client_id: String,
     pub github_client_secret: String,
     pub github_redirect_uri: String,
+    pub frontend_url: Url,
     pub github_api_base_url: Url,
     pub github_webhook_url: Url,
     pub github_webhook_secret: String,
@@ -103,6 +104,12 @@ impl Config {
             key: "GITHUB_REDIRECT_URI",
             message: e.to_string(),
         })?;
+        let frontend_url = parse_url(
+            "FRONTEND_URL",
+            optional("FRONTEND_URL")
+                .unwrap_or_else(|| "http://localhost:3000".to_string())
+                .as_str(),
+        )?;
 
         let mut github_api_base_url = optional("GITHUB_API_BASE_URL")
             .unwrap_or_else(|| "https://api.github.com/".to_string());
@@ -140,6 +147,7 @@ impl Config {
             github_client_id: required("GITHUB_CLIENT_ID")?,
             github_client_secret: required("GITHUB_CLIENT_SECRET")?,
             github_redirect_uri,
+            frontend_url,
             github_api_base_url,
             github_webhook_url,
             github_webhook_secret,

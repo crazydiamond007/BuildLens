@@ -1,7 +1,6 @@
 use axum::{
-    Json,
     extract::{Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, header},
     response::{IntoResponse, Redirect, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -65,7 +64,7 @@ pub async fn github_callback(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).map_err(AppError::internal)?,
     );
-    Ok((headers, Json(user)).into_response())
+    Ok((headers, Redirect::to(state.config.frontend_url.as_str())).into_response())
 }
 
 pub async fn logout(
@@ -98,7 +97,11 @@ pub async fn logout(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).map_err(AppError::internal)?,
     );
-    Ok((response_headers, StatusCode::NO_CONTENT).into_response())
+    Ok((
+        response_headers,
+        Redirect::to(state.config.frontend_url.as_str()),
+    )
+        .into_response())
 }
 
 async fn persist_identity(

@@ -9,8 +9,8 @@ Each phase ships something runnable and is reviewed before the next starts.
 | 3 | Repository sync: GitHub client, repo/branch/commit sync, webhook receiver | **done** |
 | 4 | Workflow ingestion: runs/jobs/steps, log storage to S3, event contracts, outbox relay | **done** |
 | 5 | Java analytics: DORA, flaky tests, scoring, scheduled recomputation | **done** |
-| 6 | Python AI worker: build summaries and recommendations | **in review** |
-| 7 | Next.js dashboard | |
+| 6 | Python AI worker: build summaries and recommendations | **done** |
+| 7 | Next.js dashboard | **in review** |
 | 8 | Testing, hardening, deployment | |
 
 ## Decisions made in Phase 1
@@ -77,6 +77,28 @@ database facts and small failure-centered log ranges. It never receives raw log
 archives, and the worker does not fetch repository source files. Archive expansion and prompt size are bounded, every
 outbound string is secret-redacted, and every model citation is checked against
 the supplied IDs/ranges before the report commits.
+
+## Decisions made in Phase 7
+
+**The frontend talks only to the gateway.** Next.js Server Components forward the
+opaque session cookie to authenticated, organization-scoped read endpoints. The
+browser never receives database, RabbitMQ, MinIO, GitHub, or AI provider
+credentials, and the frontend has no service database role.
+
+**Dashboard responses are narrow read models.** The gateway joins observed facts,
+analytics derivations, and AI output after enforcing the existing `viewer` role.
+This keeps authorization in one place and avoids duplicating the shared schema in
+a browser-facing query layer. The schema and grants did not change.
+
+**Recommendation state remains read-only.** The gateway cannot update AI-owned
+tables, and Phase 7 does not weaken that grant boundary merely to support an
+acknowledge button. A future status workflow needs an explicit ownership and audit
+decision before it gains a mutation endpoint.
+
+**The design artifact is a specification, not a runtime.** Its Hanken Grotesk and
+JetBrains Mono typography, OKLCH themes, dense application shell, semantic states,
+and responsive layouts were rebuilt as typed React components and CSS. The
+prototype support runtime is not shipped.
 
 ## Deferred, deliberately
 

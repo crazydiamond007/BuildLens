@@ -9,7 +9,7 @@ shared Postgres.
 
 ---
 
-## Status: Phase 6 implemented on its feature branch and pending owner review.
+## Status: Phase 7 implemented on its feature branch and pending owner review.
 
 Phase 1 delivered infrastructure and the full database schema. Phase 2 delivered
 GitHub OAuth, Redis sessions, API tokens, unified authentication, organization and
@@ -51,7 +51,7 @@ analytics role grant boundary. No tracked real run currently exposes a JUnit
 artifact, so artifact capture is covered by parser tests but is not yet confirmed
 end-to-end against GitHub.
 
-Phase 6 is implemented on `feat/phase-6-ai-worker`: a UV-managed Python 3.13 /
+Phase 6 is merged: a UV-managed Python 3.13 /
 FastAPI service consumes the same thin events, reads facts/derivations from
 Postgres and bounded failure excerpts from MinIO, and writes structured grounded
 reports and recommendations. Migration 12 adds its event-ID receipt ledger because
@@ -61,8 +61,15 @@ queue and DLX, valid duplicate no-op processing with one receipt and zero report
 unknown-version dead-lettering, container health/readiness, and the manual endpoint
 auth boundary. Seventeen unit tests cover config, event validation, grounding, redaction, and
 cost accounting. A real Anthropic generation is not yet exercised because the
-local `.env` has no API key. **Phases 7-8 do not exist yet:** no frontend or
-hardening phase. Phase 7 starts only after owner review and Phase 6 merge.
+original review environment had no API key.
+
+Phase 7 is implemented on `feat/phase-7-frontend`: a Next.js 16 / React 19
+dashboard renders the approved Claude design through real, viewer-scoped gateway
+read models. It covers organization overview, repositories, repository detail,
+workflow runs and evidence, DORA history, flaky tests, AI reports, responsive
+navigation, dark/light themes, and explicit loading/empty/error states. The
+frontend talks only to the gateway; it has no database, broker, object-storage,
+GitHub, or model credentials. The schema and role grants did not change.
 
 Phase list and the reasoning behind each Phase 1 decision: `docs/phases.md`.
 
@@ -78,7 +85,7 @@ directory with a README is the correct state for work that has not been approved
 not receive finished code. Where the Rust/Java/Python boundary or an event contract
 needs a judgement call, surface it rather than silently picking.
 
-**Keep changes scoped to the current phase.** Phases 1-5 are merged. Phase 6 is in
+**Keep changes scoped to the current phase.** Phases 1-6 are merged. Phase 7 is in
 review. Work each phase on its own branch (`feat/phase-N-...`) and open it for
 review before it merges - the owner reviews, with Claude, before the next phase
 starts.
@@ -173,7 +180,7 @@ gateway/          Rust + Axum. Auth, GitHub API, sync, and webhook ingestion.
   src/relay.rs      the outbox -> RabbitMQ relay (topology, confirms, backoff)
   src/logs.rs       build-log storage to S3/MinIO (best-effort, off the hot path)
   src/junit.rs      bounded JUnit artifact parsing into test_results
-  src/routes/       auth/tenancy/tokens plus repository discovery and tracking
+  src/routes/       auth/tenancy/tracking plus authenticated dashboard read models
 infra/migrations/ 12 migrations, 28 application tables. The schema source of truth.
 infra/postgres/   init/01-roles.sh: creates the 3 service roles (passwords can't
                   live in a migration, so role creation cannot either)
@@ -181,7 +188,7 @@ infra/minio/      bootstrap.sh: creates the buckets
 contracts/        per-event example payloads (the contract spec lives in README.md)
 analytics/        Java 25 + Spring Boot. Rabbit consumer and derived analytics.
 ai-worker/        Python + FastAPI + UV. Grounded AI reports and recommendations.
-frontend/         empty. Phase 7.
+frontend/         Next.js 16 dashboard. Server Components read through gateway.
 docs/phases.md    the decision log; read it
 ```
 
@@ -481,7 +488,7 @@ No Phase 5 schema migration was needed.
 
 ---
 
-## Phase 6: AI build summaries & recommendations (Python). Implemented, pending review.
+## Phase 6: AI build summaries & recommendations (Python). Delivered.
 
 Phase 6 is the **first Python service and the third consumer**. Rust produced the
 facts, Java derived the numbers; Phase 6 *explains* them. It consumes the same
@@ -586,3 +593,58 @@ Dependency and secret values are required and validated at boot.
 The Next.js frontend (Phase 7) and hardening (Phase 8). No gateway or analytics
 changes - if the worker needs a fact that is not ingested or derived yet, flag it
 back, do not synthesise it.
+
+---
+
+## Phase 7: Next.js dashboard. Implemented, pending review.
+
+Phase 7 is the browser-facing read layer. It does not become a fourth database
+client. Next.js Server Components call the Rust gateway, forwarding the existing
+opaque session cookie, and the gateway applies the same organization membership
+checks used by the API.
+
+### Decisions locked in
+
+**The gateway remains the browser boundary.** Three authenticated `viewer` read
+routes expose an organization dashboard, repository insights, and workflow-run
+detail. They join facts, Java derivations, and Python output into narrow response
+models. No credentials other than the opaque session cookie reach the frontend.
+
+**No migration or grant change.** Dashboard reads use the gateway role's existing
+read access. Recommendation status controls remain read-only because allowing the
+gateway to update `ai_recommendations` would violate AI-worker ownership and needs
+an explicit future ownership/audit decision.
+
+**The Claude design is a specification, not a dependency.** Hanken Grotesk and
+JetBrains Mono are shipped locally. Its OKLCH color tokens, dense shell, metric
+cards, semantic states, evidence panels, command navigation, and responsive layout
+were rebuilt as typed React components and CSS. The prototype HTML runtime and
+support script are not shipped.
+
+### Delivered scope
+
+- **Next.js 16 / React 19 in `frontend/`**, using the App Router, TypeScript,
+  Server Components for reads, small client islands for navigation/theme, and a
+  standalone production image.
+- **Organization overview and drill-downs** for repository scores, recent runs,
+  DORA rollups, flaky tests, AI reports, and recommendations.
+- **Workflow evidence view** for jobs, steps, JUnit failures, bounded log metadata,
+  model provenance, report cost, and recommendations.
+- **Application states and shell** including GitHub login, organization switcher,
+  quick navigation, responsive sidebar, light/dark themes, loading, empty, error,
+  and permission-limited messaging.
+- **Compose and CI integration** with locked npm dependencies, audit, ESLint,
+  strict TypeScript, production build, and container health checks.
+
+### Config added
+
+`FRONTEND_PORT`, `FRONTEND_URL`, `GATEWAY_INTERNAL_URL`, and
+`GATEWAY_PUBLIC_URL`. The internal URL is used only by Server Components; OAuth
+and logout links use public browser URLs, and the gateway redirects both flows to
+`FRONTEND_URL`.
+
+### Deliberately absent (do NOT build in Phase 7)
+
+Phase 8 hardening and deployment manifests. Do not add a frontend database client,
+move authorization into browser code, proxy raw MinIO logs, or weaken table grants
+for convenience.

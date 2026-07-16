@@ -1,5 +1,6 @@
 pub mod api_tokens;
 pub mod auth;
+pub mod dashboard;
 pub mod health;
 pub mod me;
 pub mod organizations;
@@ -54,6 +55,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/organizations/{organization_id}/repositories/{repository_id}/tracking",
             delete(repositories::disable_tracking),
+        )
+        .route(
+            "/organizations/{organization_id}/dashboard",
+            get(dashboard::overview),
+        )
+        .route(
+            "/organizations/{organization_id}/repositories/{repository_id}/insights",
+            get(dashboard::repository),
+        )
+        .route(
+            "/organizations/{organization_id}/runs/{run_id}",
+            get(dashboard::run),
         )
         .route("/webhooks/github", post(crate::webhooks::receive))
         .layer(TraceLayer::new_for_http())
