@@ -41,7 +41,7 @@ up: ## Start infrastructure (postgres, redis, rabbitmq, minio) and run migration
 .PHONY: up-all
 up-all: ## Start infrastructure and all application containers
 	$(MAKE) up
-	$(COMPOSE) --profile app up -d --build --wait --no-deps gateway analytics ai-worker
+	$(COMPOSE) --profile app up -d --build --wait --no-deps gateway analytics ai-worker frontend
 
 .PHONY: down
 down: ## Stop everything (volumes preserved)
@@ -146,6 +146,22 @@ ai-check: ## Check AI worker formatting and lint
 .PHONY: ai-test
 ai-test: ## Run AI worker tests
 	cd ai-worker && uv run --frozen pytest
+
+## ---------------------------------------------------------------------------
+## Frontend (Next.js)
+## ---------------------------------------------------------------------------
+
+.PHONY: frontend-dev
+frontend-dev: ## Run the Next.js frontend on the host
+	cd frontend && npm run dev
+
+.PHONY: frontend-check
+frontend-check: ## Lint and type-check the frontend
+	cd frontend && npm run check
+
+.PHONY: frontend-build
+frontend-build: ## Create the production frontend build
+	cd frontend && npm run build
 
 .PHONY: help
 help:

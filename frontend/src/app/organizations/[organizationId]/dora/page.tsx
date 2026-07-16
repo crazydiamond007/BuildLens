@@ -1,0 +1,14 @@
+import { BandPill, MetricCard, PageHeader } from "@/components/ui";
+import { getDashboard } from "@/lib/api";
+import { formatDate, formatPercent, formatSeconds } from "@/lib/format";
+
+export default async function DoraPage({ params }: { params: Promise<{ organizationId: string }> }) {
+  const { organizationId } = await params;
+  const dashboard = await getDashboard(organizationId);
+  const latest = dashboard.dora[0];
+  const chronological = [...dashboard.dora].reverse();
+  return <><PageHeader eyebrow="Delivery performance" title="DORA metrics" description="Weekly organization rollups computed from deployments and workflow facts. Sample size stays visible so sparse data is not overinterpreted." />
+    <section className="metricGrid"><MetricCard label="Deployment frequency" value={latest?.deployment_frequency?.toFixed(2) ?? "No data"} detail={`${latest?.deployment_count ?? 0} deployments`} values={chronological.map((item) => item.deployment_frequency)} tone="success" /><MetricCard label="Lead time p50" value={formatSeconds(latest?.lead_time_p50_seconds ?? null)} detail={`p90 ${formatSeconds(latest?.lead_time_p90_seconds ?? null)}`} values={chronological.map((item) => item.lead_time_p50_seconds)} /><MetricCard label="Change failure rate" value={formatPercent(latest?.change_failure_rate ?? null)} detail={`${latest?.failed_deployment_count ?? 0} failed deployments`} values={chronological.map((item) => item.change_failure_rate)} tone="warning" /><MetricCard label="Recovery time p50" value={formatSeconds(latest?.mttr_p50_seconds ?? null)} detail={`p90 ${formatSeconds(latest?.mttr_p90_seconds ?? null)}`} values={chronological.map((item) => item.mttr_p50_seconds)} tone="warning" /></section>
+    <section className="sectionBlock"><div className="sectionHeading"><div><p className="eyebrow">Weekly history</p><h2>Metric detail</h2></div>{latest && <BandPill value={latest.performance_band} />}</div>{dashboard.dora.length ? <div className="tableWrap"><table><thead><tr><th>Period</th><th>Band</th><th>Deployments</th><th>Frequency</th><th>Lead p50</th><th>CFR</th><th>MTTR p50</th><th>Sample</th></tr></thead><tbody>{dashboard.dora.map((metric) => <tr key={metric.id}><td>{formatDate(metric.period_start)}</td><td><BandPill value={metric.performance_band} /></td><td className="mono">{metric.deployment_count}</td><td className="mono">{metric.deployment_frequency?.toFixed(2) ?? "-"}</td><td className="mono">{formatSeconds(metric.lead_time_p50_seconds)}</td><td className="mono">{formatPercent(metric.change_failure_rate)}</td><td className="mono">{formatSeconds(metric.mttr_p50_seconds)}</td><td className="mono">{metric.sample_size}</td></tr>)}</tbody></table></div> : <div className="quietState">DORA rollups will appear after deployment facts have been analyzed.</div>}</section>
+  </>;
+}

@@ -107,6 +107,34 @@ jobs:
           uv run --frozen ruff check .
           uv run --frozen pytest
 
+  frontend:
+    name: Frontend / Next.js
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Check security, lint, types, and build
+        run: |
+          npm audit --audit-level=moderate
+          npm run check
+          npm run build
+
   migrations:
     name: Database / Migrations
     runs-on: ubuntu-latest
@@ -172,7 +200,7 @@ jobs:
         run: docker compose run --rm minio-init
 
       - name: Build and start application images
-        run: docker compose --profile app up -d --build --wait --no-deps gateway analytics ai-worker
+        run: docker compose --profile app up -d --build --wait --no-deps gateway analytics ai-worker frontend
 
       - name: Check liveness and readiness
         run: |
@@ -181,10 +209,11 @@ jobs:
           curl --fail --silent --show-error http://localhost:8081/actuator/health
           curl --fail --silent --show-error http://localhost:8082/health
           curl --fail --silent --show-error http://localhost:8082/health/ready
+          curl --fail --silent --show-error http://localhost:3000
 
       - name: Show application logs after failure
         if: failure()
-        run: docker compose --profile app logs gateway analytics ai-worker
+        run: docker compose --profile app logs gateway analytics ai-worker frontend
 
       - name: Stop application services
         if: always()

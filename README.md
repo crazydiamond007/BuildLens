@@ -1,11 +1,12 @@
 # BuildLens
 
 [![CI](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml/badge.svg)](https://github.com/crazydiamond007/BuildLens/actions/workflows/ci.yml)
-[![Phase](https://img.shields.io/badge/phase-6%20in%20review-d29922.svg)](#project-status)
+[![Phase](https://img.shields.io/badge/phase-7%20in%20review-d29922.svg)](#project-status)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-000000.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Java](https://img.shields.io/badge/Java-25-ED8B00.svg?logo=openjdk&logoColor=white)](https://openjdk.org)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4-6DB33F.svg?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB.svg?logo=python&logoColor=white)](https://www.python.org)
+[![Node.js](https://img.shields.io/badge/Node.js-24-339933.svg?logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1.svg?logo=postgresql&logoColor=white)](#requirements)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?logo=docker&logoColor=white)](#quick-start)
 
@@ -16,12 +17,13 @@ guesses.
 
 It is a polyglot, event-driven backend built to be read as much as run: **Rust**
 ingests, **Java** analyses, **Python** generates, and they meet at a message bus
-and a shared Postgres. The Next.js dashboard is next on the roadmap.
+and a shared Postgres. A Next.js dashboard presents those results through the
+authenticated gateway.
 
 ```
                           ┌──────────────► Java analytics ─────┐
 Next.js  ──►  Rust gateway ──► RabbitMQ ──┤   (DORA, scores)    ├──►  Postgres
-(Phase 7)    (auth, GitHub,               └──► Python AI worker ┘
+(dashboard)  (auth, GitHub,               └──► Python AI worker ┘
               webhooks, sync,                   (failure reports)
               log capture)  │
                             └──────────────►  Postgres · Redis · MinIO
@@ -66,8 +68,9 @@ Point BuildLens at a GitHub repository and it will:
   report and actionable recommendations, each citing the job/step ids, failing
   test keys, and log line ranges it was based on.
 
-Everything is stored in one Postgres database you can query directly today; the
-dashboard (Phase 7) will sit on top of it.
+Everything is stored in one Postgres database. The dashboard reads narrow,
+organization-scoped view models from the gateway and never connects to the
+database directly.
 
 ---
 
@@ -81,7 +84,7 @@ the language best suited to its job and owns a clear slice of the data:
 | **gateway** | Rust + Axum | Auth, GitHub OAuth, repo sync, webhooks, workflow ingestion, log capture, event publishing | the observed **facts** |
 | **analytics** | Java 25 + Spring Boot | DORA, build/repo scoring, flaky-test detection, scheduled recompute | the derived **numbers** |
 | **ai-worker** | Python 3.13 + FastAPI | Grounded failure analysis, build summaries, recommendations | the AI **reports** |
-| **frontend** | Next.js | Dashboard (Phase 7) - talks only to the gateway, never to Postgres/RabbitMQ/S3 | - |
+| **frontend** | Next.js 16 + React 19 | Dashboard - talks only to the gateway, never to Postgres/RabbitMQ/S3 | - |
 
 Supporting infrastructure: **PostgreSQL 18** (single source of truth), **Redis**
 (opaque sessions), **RabbitMQ** (the event bus), and **MinIO** (S3-compatible
@@ -107,8 +110,8 @@ Delivered in reviewed phases, each shipping something runnable:
 | 3 | Repository sync: GitHub client, branch/commit/PR sync, webhooks | ✅ done |
 | 4 | Workflow ingestion: runs/jobs/steps, log storage, event contract, outbox relay | ✅ done |
 | 5 | Java analytics: DORA, flaky tests, scoring, scheduled recompute | ✅ done |
-| 6 | Python AI worker: build summaries & failure recommendations | 🔍 in review |
-| 7 | Next.js dashboard | ⏳ planned |
+| 6 | Python AI worker: build summaries & failure recommendations | ✅ done |
+| 7 | Next.js dashboard | 🔍 in review |
 | 8 | Testing, hardening, deployment | ⏳ planned |
 
 `docs/phases.md` is the decision log - the *why* behind each phase's load-bearing
@@ -127,7 +130,8 @@ To run the full stack on the host you need:
 - **Java 25+** and **Maven 3.6.3+** - analytics (`make analytics-dev`).
 - **[uv](https://docs.astral.sh/uv/)** and **Python 3.13+** - the AI worker
   (`make ai-dev`).
-- **Node.js** - only for the webhook forwarding tunnel during local development.
+- **Node.js 24+** and npm - the frontend (`make frontend-dev`) and webhook
+  forwarding tunnel during local development.
 
 PostgreSQL 18 is required because the schema uses native `uuidv7()`; the compose
 file pins it, so you do not install it yourself.
@@ -149,11 +153,13 @@ make up       # postgres, redis, rabbitmq, minio + run all migrations
 make dev             # gateway   on http://localhost:8080  (terminal 1)
 make analytics-dev   # analytics on http://localhost:8081  (terminal 2)
 make ai-dev          # AI worker on http://localhost:8082  (terminal 3)
+make frontend-dev    # frontend  on http://localhost:3000  (terminal 4)
 
 # health checks
 curl localhost:8080/health/ready     # gateway   (postgres + redis)
 curl localhost:8081/actuator/health  # analytics (database + rabbitmq)
 curl localhost:8082/health/ready     # AI worker (postgres + rabbitmq)
+curl localhost:3000                  # frontend
 ```
 
 `make help` lists every command. For the full walkthrough that ends in real
@@ -191,6 +197,7 @@ point at the compose services and need no changes for local dev):
 | -------- | ----------------- |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | From the OAuth App above. |
 | `GITHUB_REDIRECT_URI` | `http://localhost:8080/auth/github/callback`. |
+| `FRONTEND_URL` | `http://localhost:3000`, the browser destination after login/logout. |
 | `GITHUB_WEBHOOK_URL` | Your public tunnel URL (the smee channel). Registered on each tracked repo. |
 | `GITHUB_WEBHOOK_SECRET` | Any 32+ character string. Used to sign & verify deliveries. |
 | `TOKEN_ENCRYPTION_KEY` | 32 bytes, base64 (`openssl rand -base64 32`). The all-zero default is throwaway-only. |
@@ -224,6 +231,7 @@ verification still passes.
 make dev             # gateway    (terminal 1)
 make analytics-dev   # analytics  (terminal 2)
 make ai-dev          # AI worker  (terminal 3)
+make frontend-dev    # frontend   (terminal 4)
 ```
 
 Watch the gateway log for `log store configured` and `outbox relay connected to
@@ -339,8 +347,8 @@ membership mutations require the session cookie.
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | GET | `/auth/github/login` | Start GitHub OAuth |
-| GET | `/auth/github/callback` | Verify OAuth state, connect the account, issue a session |
-| GET | `/auth/logout` | Revoke the current Redis session |
+| GET | `/auth/github/callback` | Verify OAuth state, connect the account, issue a session, redirect to frontend |
+| GET | `/auth/logout` | Revoke the current Redis session and redirect to frontend |
 | GET | `/me` | Current user and organization memberships |
 | GET, POST | `/organizations` | List or create BuildLens workspaces |
 | GET, POST | `/organizations/{id}/members` | List, add, or change members |
@@ -358,6 +366,17 @@ membership mutations require the session cookie.
 | DELETE | `/organizations/{id}/repositories/{repository_id}/tracking` | Remove the webhook and stop tracking |
 | POST | `/webhooks/github` | Verify, deduplicate, and persist GitHub deliveries |
 
+**Dashboard reads**
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET | `/organizations/{id}/dashboard` | Organization DORA, repository scores, runs, flaky tests, reports, and recommendations |
+| GET | `/organizations/{id}/repositories/{repository_id}/insights` | Repository score history, DORA, runs, tests, and AI output |
+| GET | `/organizations/{id}/runs/{run_id}` | Workflow run, jobs, steps, tests, log metadata, report, and recommendations |
+
+All dashboard reads accept the existing session or read-only API token and require
+at least the `viewer` organization role.
+
 **Service health & internals**
 
 | Method | Path | Service | Purpose |
@@ -367,9 +386,9 @@ membership mutations require the session cookie.
 | GET | `/health`, `/health/ready` | ai-worker (8082) | liveness / readiness (postgres + rabbitmq) |
 | POST | `/reports/retrigger` | ai-worker (8082) | retry a failed per-run report; needs `Authorization: Bearer $AI_MANUAL_TRIGGER_TOKEN` |
 
-Until the dashboard lands, the analytics and AI outputs are consumed by querying
-Postgres directly (see the SQL in step 7): `dora_metrics`, `build_scores`,
-`repository_scores`, `flaky_tests`, `ai_reports`, and `ai_recommendations`.
+The Next.js Server Components consume these gateway views. Direct Postgres access
+remains useful for the end-to-end verification SQL in step 7, but is not part of
+the browser architecture.
 
 ---
 
@@ -521,7 +540,7 @@ The producer is always deployed before its consumers, therefore:
 gateway/          Rust + Axum - auth, GitHub API, sync, webhooks, ingestion, relay
 analytics/        Java 25 + Spring Boot - DORA, scoring, flaky-test analytics
 ai-worker/        Python 3.13 + FastAPI + uv - grounded summaries & recommendations
-frontend/         Next.js dashboard (Phase 7) - talks only to the gateway
+frontend/         Next.js 16 dashboard - talks only to the gateway
 contracts/        Shared event payload examples (the contract itself is above)
 infra/
   migrations/     The one source of truth for the schema (numbered .up/.down SQL)
@@ -548,10 +567,12 @@ make ps / logs       Container status / tail logs (make logs SERVICE=gateway)
 make dev             Run the gateway on the host
 make analytics-dev   Run analytics on the host
 make ai-dev          Run the AI worker on the host
+make frontend-dev    Run the Next.js frontend on the host
 
 make fmt / lint / test / check          Gateway: format, clippy (-D warnings), tests, type-check
 make analytics-check / analytics-test   Analytics: compile (warnings denied), unit tests
 make ai-check / ai-test                  AI worker: ruff format+lint, pytest
+make frontend-check / frontend-build     Frontend: ESLint+TypeScript, production build
 
 make migrate         Apply all pending migrations
 make migrate-down    Roll back the last migration
@@ -575,7 +596,8 @@ in **[CONTRIBUTING.md](CONTRIBUTING.md)**; in short:
    per-attempt run rows, UUIDv7 keys).
 3. Add tests and make the checks pass on the service you touched - gateway:
    `make fmt lint test`; analytics: `make analytics-check analytics-test`;
-   ai-worker: `make ai-check ai-test`.
+   ai-worker: `make ai-check ai-test`; frontend: `make frontend-check
+   frontend-build`.
 4. Open a pull request against `main` describing what changed and why.
 
 The database (`infra/migrations` only, add a grant when you add a table) and the
@@ -589,8 +611,8 @@ The database (`infra/migrations` only, add a grant when you add a table) and the
 
 The most useful contributions right now:
 
-- **Phase 7 - the Next.js dashboard.** The whole backend exists and is queryable;
-  it needs a UI that talks only to the gateway. Design is being finalised.
+- **Phase 7 review.** Exercise the responsive dashboard against real tracked
+  repositories and report any accessibility, data-shape, or browser issues.
 - **Phase 8 - hardening.** Integration tests across services, deployment
   manifests, observability, table partitioning for the high-volume tables.
 - **Real GitHub Deployment API ingestion** - deployments are currently *inferred*
