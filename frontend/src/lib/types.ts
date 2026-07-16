@@ -16,6 +16,40 @@ export type Me = {
   memberships: Membership[];
 };
 
+export type GitHubPermissions = {
+  admin: boolean;
+  maintain: boolean;
+  push: boolean;
+  pull: boolean;
+};
+
+export type TrackingSummary = {
+  repository_id: string;
+  organization_id: string;
+  tracking_enabled: boolean;
+};
+
+// `tracking` is null unless some organization the user belongs to has already
+// tracked the repository, and its organization_id is not necessarily the one
+// currently being viewed: GitHub repositories are claimed by a single workspace.
+export type DiscoveredRepository = {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: { id: number; login: string };
+  description: string | null;
+  default_branch: string;
+  private: boolean;
+  archived: boolean;
+  fork: boolean;
+  language: string | null;
+  html_url: string;
+  created_at: string | null;
+  pushed_at: string | null;
+  permissions: GitHubPermissions | null;
+  tracking: TrackingSummary | null;
+};
+
 export type DoraMetric = {
   id: string;
   repository_id: string | null;

@@ -165,6 +165,32 @@ td small { display: block; margin-top: 3px; color: var(--fg-2); font-size: 10.5p
 .emptyGlyph { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); color: var(--accent-line); font-family: "JetBrains Mono Variable", monospace; }
 .repoMeta { display: flex; flex-wrap: wrap; gap: 8px; margin: -15px 0 25px; }
 .repoMeta span { padding: 3px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg-2); font-size: 10px; }
+.emptyAction { margin-top: 15px; }
+.navLabel.spaced { padding-top: 14px; }
+.trackToolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 13px; }
+.searchInput { width: min(340px, 100%); padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-1); color: var(--fg-0); font-size: 12.5px; }
+.searchInput:focus-visible { outline: none; border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-dim); }
+.searchInput::placeholder { color: var(--fg-2); }
+.trackFilter { display: flex; align-items: center; gap: 6px; color: var(--fg-1); font-size: 12px; cursor: pointer; user-select: none; }
+.trackFilter input { accent-color: var(--accent); }
+.trackCount { margin-left: auto; color: var(--fg-2); font-size: 11px; }
+.trackList { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-1); }
+.trackRow { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 13px; border-top: 1px solid var(--border); }
+.trackRow:first-child { border-top: 0; }
+.trackRow:hover { background: var(--bg-2); }
+.trackMain { min-width: 0; }
+.trackName { display: flex; align-items: center; gap: 7px; }
+.trackName strong { font-size: 12.5px; }
+.trackTag { flex: none; padding: 2px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg-2); font-family: "JetBrains Mono Variable", monospace; font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase; }
+.trackMain small { display: block; max-width: 560px; overflow: hidden; margin-top: 3px; color: var(--fg-2); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.trackSide { display: flex; align-items: center; gap: 11px; flex: none; }
+.trackNote { max-width: 230px; color: var(--fg-2); font-size: 10.5px; line-height: 1.4; text-align: right; }
+.trackNote.error { color: var(--failure); }
+.trackButton { min-width: 78px; padding: 6px 12px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--bg-1); color: var(--fg-1); cursor: pointer; font-size: 12px; font-weight: 600; }
+.trackButton:hover:not(:disabled) { border-color: var(--accent-line); color: var(--fg-0); }
+.trackButton.primary { border-color: transparent; background: var(--accent); color: var(--accent-fg); }
+.trackButton.primary:hover:not(:disabled) { background: color-mix(in oklab, var(--accent) 88%, white); }
+.trackButton:disabled { cursor: not-allowed; opacity: 0.45; }
 .primaryButton, .secondaryButton { display: inline-flex; align-items: center; justify-content: center; padding: 8px 13px; border: 1px solid transparent; border-radius: 7px; background: var(--accent); color: var(--accent-fg); cursor: pointer; font-size: 12.5px; font-weight: 700; }
 .secondaryButton { border-color: var(--border-strong); background: var(--bg-1); color: var(--fg-1); }
 
@@ -212,6 +238,7 @@ td small { display: block; margin-top: 3px; color: var(--fg-2); font-size: 10.5p
 .loginBrand { margin-bottom: 90px; }
 .loginPanel > h1 { max-width: 590px; margin: 12px 0 18px; font-size: clamp(42px, 6vw, 72px); line-height: 0.98; letter-spacing: -0.055em; }
 .loginCopy { max-width: 520px; margin: 0 0 28px; color: var(--fg-1); font-size: 16px; line-height: 1.6; }
+.loginNotice { max-width: 520px; margin: -8px 0 22px; padding: 10px 13px; border: 1px solid color-mix(in oklab, var(--warning) 38%, var(--border)); border-radius: 8px; background: color-mix(in oklab, var(--warning) 8%, var(--bg-1)); color: var(--fg-0); font-size: 13px; line-height: 1.5; }
 .loginPanel > .primaryButton { align-self: flex-start; min-width: 175px; }
 .loginFeatures { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 80px; color: var(--fg-2); font-family: "JetBrains Mono Variable", monospace; font-size: 10px; text-transform: uppercase; }
 .loginVisual { position: relative; overflow: hidden; background: var(--bg-1); border-left: 1px solid var(--border); }
@@ -241,6 +268,7 @@ td small { display: block; margin-top: 3px; color: var(--fg-2); font-size: 10.5p
   .metricGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .splitGrid { grid-template-columns: 1fr; }
   .runFacts { grid-template-columns: repeat(3, 1fr); }
+  
   .runFacts > div:nth-child(4) { border-left: 0; border-top: 1px solid var(--border); }
   .runFacts > div:nth-child(5) { border-top: 1px solid var(--border); }
 }
@@ -274,4 +302,9 @@ td small { display: block; margin-top: 3px; color: var(--fg-2); font-size: 10.5p
   .runFacts > div:nth-child(-n+2) { border-top: 0; }
   .boundaryNotice { display: grid; }
   .stepList > div { grid-template-columns: 22px 78px minmax(160px, 1fr) auto; }
+  .trackToolbar { flex-wrap: wrap; }
+  .trackCount { margin-left: 0; }
+  .trackRow { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .trackSide { width: 100%; justify-content: space-between; }
+  .trackNote { max-width: none; text-align: left; }
 }

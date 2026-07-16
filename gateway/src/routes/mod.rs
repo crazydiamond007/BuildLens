@@ -24,7 +24,10 @@ pub fn router(state: AppState) -> Router {
         .route("/health/ready", get(health::ready))
         .route("/auth/github/login", get(auth::github_login))
         .route("/auth/github/callback", get(auth::github_callback))
-        .route("/auth/logout", get(auth::logout))
+        // POST, not GET: a link to a GET logout is a cross-site request any page
+        // can make, and SameSite=Lax still sends the session cookie on top-level
+        // navigation, so a bare link elsewhere could sign the user out.
+        .route("/auth/logout", post(auth::logout))
         .route("/me", get(me::get))
         .route(
             "/organizations",

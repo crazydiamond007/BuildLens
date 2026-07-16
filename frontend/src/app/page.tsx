@@ -3,7 +3,18 @@ import { redirect } from "next/navigation";
 
 import { ApiError, getMe, githubLoginUrl } from "@/lib/api";
 
-export default async function Home() {
+const signInErrors: Record<string, string> = {
+  access_denied: "Sign-in was cancelled on GitHub. Nothing was shared.",
+  expired_state: "That sign-in attempt expired before it finished. Try again.",
+  invalid_request: "That sign-in response could not be verified. Try again.",
+};
+
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { error: errorCode } = await searchParams;
   let me = null;
   try {
     me = await getMe();
@@ -11,10 +22,13 @@ export default async function Home() {
     if (!(error instanceof ApiError && error.status === 401)) throw error;
   }
   if (me?.memberships[0]) redirect(`/organizations/${me.memberships[0].id}/overview`);
-  return me ? <LoginState signedIn email={me.email} /> : <LoginState />;
+  const notice = errorCode
+    ? (signInErrors[errorCode] ?? signInErrors.invalid_request)
+    : null;
+  return me ? <LoginState signedIn email={me.email} notice={notice} /> : <LoginState notice={notice} />;
 }
 
-function LoginState({ signedIn = false, email }: { signedIn?: boolean; email?: string }) {
+function LoginState({ signedIn = false, email, notice }: { signedIn?: boolean; email?: string; notice?: string | null }) {
   return (
     <main className="loginPage">
       <section className="loginPanel">
@@ -22,6 +36,7 @@ function LoginState({ signedIn = false, email }: { signedIn?: boolean; email?: s
         <p className="eyebrow">Engineering intelligence</p>
         <h1>See the signal behind every build.</h1>
         <p className="loginCopy">Connect GitHub Actions to track delivery performance, surface flaky tests, and turn failed builds into grounded recommendations.</p>
+        {notice && <p className="loginNotice" role="status">{notice}</p>}
         {signedIn ? (
           <div className="emptyState"><h3>No organization access</h3><p>{email} is signed in, but has no active BuildLens membership.</p></div>
         ) : (

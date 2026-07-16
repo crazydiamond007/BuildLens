@@ -14,13 +14,11 @@ export default async function OrganizationLayout({ children, params }: { childre
   }
   const membership = me.memberships.find((item) => item.id === organizationId);
   if (!membership) notFound();
-  const gatewayPublicUrl = process.env.GATEWAY_PUBLIC_URL ?? "http://localhost:8080";
   return (
     <AppShell
       membership={membership}
       memberships={me.memberships}
       user={{ name: me.name, email: me.email, avatarUrl: me.avatar_url }}
-      logoutUrl={`${gatewayPublicUrl}/auth/logout`}
     >
       {children}
     </AppShell>

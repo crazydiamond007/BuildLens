@@ -347,8 +347,8 @@ membership mutations require the session cookie.
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | GET | `/auth/github/login` | Start GitHub OAuth |
-| GET | `/auth/github/callback` | Verify OAuth state, connect the account, issue a session, redirect to frontend |
-| GET | `/auth/logout` | Revoke the current Redis session and redirect to frontend |
+| GET | `/auth/github/callback` | Verify OAuth state, connect the account, issue a session, redirect to frontend (or back to sign-in with `?error=` when authorization is refused) |
+| POST | `/auth/logout` | Revoke the current Redis session and clear the cookie. Idempotent, and POST so a cross-site link cannot trigger it |
 | GET | `/me` | Current user and organization memberships |
 | GET, POST | `/organizations` | List or create BuildLens workspaces |
 | GET, POST | `/organizations/{id}/members` | List, add, or change members |
