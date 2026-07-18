@@ -13,7 +13,7 @@ use crate::{
     crypto::random_urlsafe,
     error::AppError,
     github::{self, GitHubUser, OAuthToken},
-    github_app, installations, sessions,
+    github_api, github_app, installations, sessions,
     state::AppState,
 };
 
@@ -94,6 +94,24 @@ pub async fn github_setup(
     let Some(installation_id) = query.installation_id else {
         return Ok(Redirect::to(state.config.frontend_url.as_str()).into_response());
     };
+
+    // Authorization: only link an installation the signed-in user actually
+    // controls. GitHub's /user/installations lists exactly the installations this
+    // user can manage, so an id they cannot see is a hijack attempt (the linking
+    // step would otherwise steal the installation from another workspace), not a
+    // link. Checked before any write or App-level call.
+    let user_token = github_api::user_access_token(&state, user_id).await?;
+    if !github::user_installation_ids(&state, &user_token)
+        .await?
+        .contains(&installation_id)
+    {
+        warn!(
+            %user_id,
+            installation_id,
+            "rejected setup for an installation the user cannot access"
+        );
+        return Ok(sign_in_redirect(&state, SignInError::InvalidRequest));
+    }
 
     let installation = github_app::fetch_installation(&state, installation_id).await?;
     installations::upsert(&state.db, &installation).await?;

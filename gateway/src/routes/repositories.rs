@@ -149,12 +149,13 @@ pub async fn enable_tracking(
     };
     let api = GitHubApi::new(&state, &token);
     // The installation token can only read repositories the App was granted, so a
-    // repository it cannot fetch is one the user has not added to the App.
-    let repository = api.repository(github_repository_id).await.map_err(|_| {
-        AppError::bad_request(
+    // 404 means the user has not added this one to the App. Anything else (rate
+    // limit, 5xx) propagates as-is rather than masquerading as a user error.
+    let Some(repository) = api.repository_opt(github_repository_id).await? else {
+        return Err(AppError::bad_request(
             "this repository is not part of your BuildLens installation; add it to the app on GitHub first",
-        )
-    })?;
+        ));
+    };
 
     let existing_organization = sqlx::query_scalar::<_, Uuid>(
         "SELECT organization_id FROM repositories

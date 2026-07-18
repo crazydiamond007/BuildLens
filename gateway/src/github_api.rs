@@ -67,6 +67,23 @@ pub async fn organization_installation_token(
     }
 }
 
+/// The signed-in user's own GitHub token, decrypted. Used only to check what the
+/// user is authorized for (their App installations) - never for repository
+/// access, which goes through installation tokens.
+pub async fn user_access_token(state: &AppState, user_id: Uuid) -> Result<String, AppError> {
+    let ciphertext = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT access_token_encrypted FROM github_accounts WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::bad_request("the user has no connected GitHub account"))?;
+    state
+        .token_cipher
+        .decrypt(&ciphertext)
+        .map_err(AppError::from)
+}
+
 pub struct GitHubApi<'a> {
     state: &'a AppState,
     token: &'a str,
@@ -114,9 +131,33 @@ impl<'a> GitHubApi<'a> {
         }
     }
 
-    pub async fn repository(&self, repository_id: i64) -> Result<GitHubRepository, AppError> {
+    /// Fetches a repository by numeric id; a `404` becomes `None` - "this
+    /// installation cannot see the repository" - rather than an error. That lets a
+    /// caller tell a repository genuinely outside the installation apart from a
+    /// transient GitHub failure (rate limit, 5xx), which still surfaces as an error.
+    pub async fn repository_opt(
+        &self,
+        repository_id: i64,
+    ) -> Result<Option<GitHubRepository>, AppError> {
         let url = self.endpoint(&["repositories", &repository_id.to_string()])?;
-        self.get(url).await
+        let response = self
+            .request(self.state.http.get(url.clone()))
+            .send()
+            .await
+            .map_err(|error| AppError::Upstream(error.to_string()))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            return Err(api_error(status, &headers, response.text().await.ok()));
+        }
+        response
+            .json::<GitHubRepository>()
+            .await
+            .map(Some)
+            .map_err(|error| AppError::Upstream(format!("invalid response from {url}: {error}")))
     }
 
     /// A page of a list endpoint that returns a bare JSON array (`/branches`,
