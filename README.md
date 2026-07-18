@@ -80,7 +80,7 @@ the language best suited to its job and owns a clear slice of the data:
 
 | Service | Language | Responsibility | Writes |
 | ------- | -------- | -------------- | ------ |
-| **gateway** | Rust + Axum | Auth, GitHub OAuth, repo sync, webhooks, workflow ingestion, log capture, event publishing | the observed **facts** |
+| **gateway** | Rust + Axum | Auth, GitHub App sign-in & installations, repo sync, webhooks, workflow ingestion, log capture, event publishing | the observed **facts** |
 | **analytics** | Java 25 + Spring Boot | DORA, build/repo scoring, flaky-test detection, scheduled recompute | the derived **numbers** |
 | **ai-worker** | Python 3.13 + FastAPI | Grounded failure analysis, build summaries, recommendations | the AI **reports** |
 | **frontend** | Next.js 16 + React 19 | Dashboard - talks only to the gateway, never to Postgres/RabbitMQ/S3 | - |
@@ -111,7 +111,7 @@ Delivered in reviewed phases, each shipping something runnable:
 | 5 | Java analytics: DORA, flaky tests, scoring, scheduled recompute | ✅ done |
 | 6 | Python AI worker: build summaries & failure recommendations | ✅ done |
 | 7 | Next.js dashboard | 🔍 in review |
-| 8 | Testing, hardening, deployment | ⏳ planned |
+| 8 | Hardening: GitHub App migration & mobile redesign done; deployment, observability, and integration tests next | 🚧 in progress |
 
 `docs/phases.md` is the decision log - the *why* behind each phase's load-bearing
 choices. `AGENTS.md` is the contributor/agent handoff describing the current
@@ -145,7 +145,7 @@ service locally.
 
 ```bash
 make env      # create .env from .env.example
-# Fill in the GitHub OAuth + webhook values and replace TOKEN_ENCRYPTION_KEY
+# Fill in the GitHub App + webhook values and replace TOKEN_ENCRYPTION_KEY
 # before using anything beyond throwaway local development (see step 1 below).
 make up       # postgres, redis, rabbitmq, minio + run all migrations
 
@@ -176,12 +176,34 @@ RabbitMQ, and a log archive in MinIO. Run them in order.
 
 Install the [requirements](#requirements) above, then create two things on GitHub:
 
-- A **GitHub OAuth App** (Settings → Developer settings → OAuth Apps). Set its
-  callback URL to `http://localhost:8080/auth/github/callback`. Note the client
-  ID and generate a client secret.
 - A **webhook forwarding URL** for local development, e.g. a channel from
   [smee.io](https://smee.io). GitHub can't reach `localhost`, so it delivers to
-  this public URL and a small tunnel forwards it to the gateway.
+  this public URL and a small tunnel forwards it to the gateway. Create it first;
+  you'll need it when registering the app.
+- A **GitHub App** (Settings → Developer settings → GitHub Apps → New GitHub App).
+  One app does everything: it signs users in *and* reads the repositories they
+  install it on. Fill it in as follows:
+
+  | Field | Value |
+  | ----- | ----- |
+  | **Homepage URL** | `http://localhost:3000` |
+  | **Callback URL** | `http://localhost:8080/auth/github/callback` (this is user sign-in) |
+  | **Setup URL** + *Redirect on update* | `http://localhost:8080/auth/github/setup` |
+  | **Webhook → Active** | on, **URL** = your smee channel, **Secret** = your `GITHUB_WEBHOOK_SECRET` |
+  | **Repository permissions** | Actions: **Read-only**, Contents: **Read-only**, Metadata: **Read-only** |
+  | **Account permissions** | Email addresses: **Read-only** |
+  | **Subscribe to events** | Workflow run, Workflow job, Push, Pull request, Pull request review |
+  | **Where can this be installed** | Only on this account (fine for local dev) |
+
+  After creating it: note the **App ID**, **generate a private key** (downloads a
+  `.pem`), note the **Client ID**, **generate a client secret**, and note the
+  app's **public name** — its URL slug (`github.com/apps/<slug>`). Then **Install**
+  the app on your account and pick a repository or two.
+
+  > `installation` and `installation_repositories` events are delivered to a
+  > GitHub App automatically; you don't subscribe to them. There are no per-repo
+  > webhooks — the app has one webhook and receives events for every repo you
+  > install it on.
 
 ### 1. Configure `.env`
 
@@ -194,19 +216,23 @@ point at the compose services and need no changes for local dev):
 
 | Variable | What to set it to |
 | -------- | ----------------- |
-| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | From the OAuth App above. |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | The app's **Client ID** and a generated client secret (used for user sign-in). |
+| `GITHUB_APP_ID` | The app's numeric **App ID**. |
+| `GITHUB_APP_SLUG` | The app's URL slug (`github.com/apps/<slug>`); builds the "Install" link. |
+| `GITHUB_APP_PRIVATE_KEY` | The `.pem` you downloaded. Paste the raw PEM (quoted, newlines and all) **or** base64-encode the whole file onto one line — both work. |
 | `GITHUB_REDIRECT_URI` | `http://localhost:8080/auth/github/callback`. |
 | `FRONTEND_URL` | `http://localhost:3000`, the browser destination after login/logout. |
-| `GITHUB_WEBHOOK_URL` | Your public tunnel URL (the smee channel). Registered on each tracked repo. |
-| `GITHUB_WEBHOOK_SECRET` | Any 32+ character string. Used to sign & verify deliveries. |
+| `GITHUB_WEBHOOK_URL` | Your public tunnel URL (the smee channel). This is where GitHub sends the app's events; the gateway doesn't read it, it's for the tunnel. |
+| `GITHUB_WEBHOOK_SECRET` | Any 32+ character string. Must match the app's webhook secret; used to sign & verify deliveries. |
 | `TOKEN_ENCRYPTION_KEY` | 32 bytes, base64 (`openssl rand -base64 32`). The all-zero default is throwaway-only. |
 | `ANTHROPIC_API_KEY` | An Anthropic API key, for the Phase 6 AI worker. |
 | `AI_MANUAL_TRIGGER_TOKEN` | A random 32+ char token (`openssl rand -hex 32`) protecting the manual retry endpoint. |
 
 The gateway checks these at startup. Leave the placeholders in place and
 `ENVIRONMENT=development` logs a warning per value but still boots, so you can
-bring the stack up before you have an OAuth app. With `ENVIRONMENT=production` the
-same values refuse to start, and the error names every one of them at once:
+bring the stack up before you have registered the app. With
+`ENVIRONMENT=production` the same values refuse to start, and the error names
+every one of them at once:
 
 ```
 configuration error: refusing to start in production:
@@ -268,33 +294,39 @@ Open **http://localhost:3000** and press **Continue with GitHub**. There is no
 sign-up form and no password: GitHub supplies your name, email, and avatar, and
 BuildLens creates your personal workspace on first sign-in.
 
-The page lists the scopes before it sends you to GitHub. The one worth
-understanding is `repo`, which is broad - it covers reading Actions logs and
-registering a webhook on private repositories, and GitHub's OAuth scopes offer
-nothing narrower that can do both. BuildLens never pushes code or changes
-workflows, and your access token is encrypted (AES-GCM) before storage and never
-reaches the browser. Approving lands you back on the dashboard with the
-`buildlens_session` cookie set.
+The page explains, before it sends you to GitHub, that BuildLens connects in two
+steps. **Signing in** reads only your name, avatar, and verified email — there is
+no `repo` scope and no repository access at all. **Installing the app** (next
+step) is what grants repository access, and only on the repositories you pick.
+BuildLens never pushes code or changes workflows, and any token is encrypted
+(AES-GCM) before storage and never reaches the browser. Approving lands you back
+on the dashboard with the `buildlens_session` cookie set.
 
-### 6. Track a repository
+### 6. Install the app and track a repository
 
-Go to **Settings → Repository tracking** in the sidebar. Every repository your
-GitHub account can see is listed; press **Track** on one.
+Go to **Settings → Repository tracking** in the sidebar. If you haven't installed
+the app on this workspace yet, you'll see an **Install on GitHub** button — it
+takes you to GitHub to install the app and choose which repositories it can see.
+(If you already installed it in step 0, it's linked and you can skip straight to
+tracking.) After installing, GitHub returns you to BuildLens and the chosen
+repositories appear.
 
-Tracking needs the BuildLens `admin` role (your personal-workspace owner
-qualifies) **and** GitHub admin permission on the repository, because BuildLens
-registers the webhook for you. Repositories you lack admin on, and repositories
-another workspace already claimed, say so in place rather than failing on click.
+Press **Track** on one. Tracking needs the BuildLens `admin` role (your
+personal-workspace owner qualifies) — but **no** GitHub admin permission and no
+per-repo webhook, because the app already receives events for every repository
+it's installed on. A repository another workspace already claimed says so in
+place rather than failing on click.
 
-Pressing Track registers the webhook and queues the initial backfill, which walks
+Pressing Track enables tracking and queues the initial backfill, which walks
 branches → commits → pull requests → workflows → workflow runs (with their jobs
 and steps), checkpointing each page so an interrupted backfill resumes rather
 than restarting.
 
-> Not seeing a repository you own? If it belongs to a GitHub organization, that
-> organization has to approve the OAuth app first (its **Settings → Third-party
-> access**). Until then GitHub hides it from the API and BuildLens cannot know it
-> exists.
+> Not seeing a repository you own? Add it to the app's installation on GitHub
+> (**your account → Settings → Applications → BuildLens → Configure**, then adjust
+> **Repository access**). Because access is per-installation, there's no separate
+> org "third-party access" approval to chase — if the app can see it, so can
+> BuildLens.
 
 The equivalent API calls, if you would rather script it, are in
 [Using the API](#using-the-api) below.
@@ -365,8 +397,9 @@ membership mutations require the session cookie.
 
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
-| GET | `/auth/github/login` | Start GitHub OAuth |
-| GET | `/auth/github/callback` | Verify OAuth state, connect the account, issue a session, redirect to frontend (or back to sign-in with `?error=` when authorization is refused) |
+| GET | `/auth/github/login` | Start GitHub App user sign-in |
+| GET | `/auth/github/callback` | Verify state, connect the account, issue a session, redirect to frontend (or back to sign-in with `?error=` when authorization is refused) |
+| GET | `/auth/github/setup` | GitHub's post-install redirect: links the new installation to the signed-in user's workspace |
 | POST | `/auth/logout` | Revoke the current Redis session and clear the cookie. Idempotent, and POST so a cross-site link cannot trigger it |
 | GET | `/me` | Current user and organization memberships |
 | GET, POST | `/organizations` | List or create BuildLens workspaces |
@@ -379,11 +412,11 @@ membership mutations require the session cookie.
 
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
-| GET | `/github/repositories` | Discover visible GitHub repos and their tracking state |
+| GET | `/organizations/{id}/github-repositories` | Discover the repos this workspace's app installation can see, and their tracking state (or an install URL if not installed yet) |
 | GET | `/organizations/{id}/repositories` | List repositories in an organization |
-| PUT | `/organizations/{id}/github-repositories/{github_repo_id}/tracking` | Register the webhook, enable tracking, queue initial sync |
-| DELETE | `/organizations/{id}/repositories/{repository_id}/tracking` | Remove the webhook and stop tracking |
-| POST | `/webhooks/github` | Verify, deduplicate, and persist GitHub deliveries |
+| PUT | `/organizations/{id}/github-repositories/{github_repo_id}/tracking` | Enable tracking and queue the initial sync (no webhook to register — the app already receives events) |
+| DELETE | `/organizations/{id}/repositories/{repository_id}/tracking` | Stop tracking (the app installation stays; events for the repo are simply ignored) |
+| POST | `/webhooks/github` | Verify, deduplicate, and persist GitHub deliveries, including installation lifecycle events |
 
 **Dashboard reads**
 

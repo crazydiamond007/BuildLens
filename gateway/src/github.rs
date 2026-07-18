@@ -8,14 +8,18 @@ const AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const USER_URL: &str = "https://api.github.com/user";
 const EMAILS_URL: &str = "https://api.github.com/user/emails";
-const OAUTH_SCOPES: &str = "read:user user:email repo read:org";
 
+/// This is a GitHub *App* user-authorization request, so it carries no `scope`.
+/// A GitHub App's user-to-server access is defined by the App's configured
+/// account permissions (BuildLens asks only for read access to the profile and
+/// email), not by OAuth scopes - GitHub ignores a `scope` parameter here. The
+/// broad `repo` scope this once sent is gone entirely; repository access now
+/// comes from the App installation, not from the person who signed in.
 pub fn authorize_url(state: &AppState, csrf_state: &str) -> Result<Url, AppError> {
     let mut url = Url::parse(AUTHORIZE_URL).map_err(AppError::internal)?;
     url.query_pairs_mut()
         .append_pair("client_id", &state.config.github_client_id)
         .append_pair("redirect_uri", &state.config.github_redirect_uri)
-        .append_pair("scope", OAUTH_SCOPES)
         .append_pair("state", csrf_state)
         .append_pair("allow_signup", "true");
     Ok(url)

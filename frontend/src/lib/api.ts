@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 
 import type {
   Dashboard,
-  DiscoveredRepository,
+  DiscoverResponse,
   Me,
   RepositoryInsights,
   RunDetail,
@@ -68,8 +68,12 @@ export function getMe(): Promise<Me> {
   return request<Me>("/me");
 }
 
-export function getDiscoveredRepositories(): Promise<DiscoveredRepository[]> {
-  return request<DiscoveredRepository[]>("/github/repositories");
+export function getDiscoveredRepositories(
+  organizationId: string,
+): Promise<DiscoverResponse> {
+  return request<DiscoverResponse>(
+    `/organizations/${organizationId}/github-repositories`,
+  );
 }
 
 export function getDashboard(organizationId: string): Promise<Dashboard> {

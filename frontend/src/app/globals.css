@@ -96,6 +96,8 @@ kbd { margin-left: auto; padding: 1px 5px; border: 1px solid var(--border-strong
 .iconButton:hover, .mobileMenu:hover { border-color: var(--border-strong); color: var(--fg-0); }
 .mobileMenu { display: none; }
 .mainContent { width: min(1460px, 100%); margin: 0 auto; padding: 34px clamp(20px, 3.5vw, 52px) 64px; }
+/* Desktop keeps the sidebar; the bottom tab bar only appears on narrow screens. */
+.bottomNav { display: none; }
 
 .pageHeader { display: flex; align-items: flex-end; justify-content: space-between; gap: 30px; margin-bottom: 29px; }
 .pageHeader h1 { margin: 6px 0 0; font-size: clamp(25px, 3vw, 34px); line-height: 1.12; letter-spacing: -0.035em; }
@@ -243,10 +245,16 @@ td small { display: block; margin-top: 3px; color: var(--fg-2); font-size: 10.5p
 .scopeIntro { margin: 0 0 12px; color: var(--fg-1); font-size: 13px; font-weight: 500; }
 .scopeList { display: flex; flex-direction: column; gap: 11px; margin: 0; padding: 0; list-style: none; }
 .scopeList li { display: flex; flex-direction: column; gap: 5px; }
+.scopeStep { color: var(--fg-1); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
 .scopeKeys { display: flex; flex-wrap: wrap; gap: 5px; }
 .scopeList code { padding: 2px 6px; border-radius: 5px; background: var(--bg-2); color: var(--fg-0); font-family: "JetBrains Mono Variable", monospace; font-size: 11px; }
 .scopeList span { color: var(--fg-2); font-size: 12px; line-height: 1.55; }
 .scopeNote { margin: 14px 0 0; padding-top: 13px; border-top: 1px solid var(--border); color: var(--fg-2); font-size: 12px; line-height: 1.55; }
+.installPanel { max-width: 560px; padding: 26px 24px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-1); }
+.installPanel h3 { margin: 0 0 8px; font-size: 18px; }
+.installPanel p { margin: 0 0 16px; color: var(--fg-2); font-size: 14px; line-height: 1.6; }
+.installPanel .primaryButton { display: inline-flex; }
+.installNote { margin: 14px 0 0; color: var(--fg-1); font-size: 13px; }
 .loginPanel > .primaryButton { align-self: flex-start; min-width: 175px; }
 .loginFeatures { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 80px; color: var(--fg-2); font-family: "JetBrains Mono Variable", monospace; font-size: 10px; text-transform: uppercase; }
 .loginVisual { position: relative; overflow: hidden; background: var(--bg-1); border-left: 1px solid var(--border); }
@@ -287,9 +295,11 @@ td small { display: block; margin-top: 3px; color: var(--fg-2); font-size: 10.5p
   .sidebar.open { transform: translateX(0); }
   .sidebarBackdrop { position: fixed; inset: 0; z-index: 25; border: 0; background: oklch(0 0 0 / 0.55); }
   .sidebarBackdrop.visible { display: block; }
-  .mobileMenu { display: inline-flex; }
+  /* The bottom bar's "More" is the drawer trigger now, so the top one retires. */
+  .mobileMenu { display: none; }
   .topbarContext, .topbarDivider { display: none; }
-  .mainContent { padding: 26px 16px 50px; }
+  /* Extra bottom padding clears the fixed tab bar and the iOS home indicator. */
+  .mainContent { padding: 22px 16px calc(78px + env(safe-area-inset-bottom)); }
   .pageHeader { align-items: flex-start; flex-direction: column; gap: 14px; }
   .loginPage { display: block; }
   .loginPanel { min-height: 100vh; padding: 35px 24px; }
@@ -297,6 +307,46 @@ td small { display: block; margin-top: 3px; color: var(--fg-2); font-size: 10.5p
   .loginPanel > h1 { margin-top: 14vh; font-size: clamp(42px, 13vw, 64px); }
   .loginFeatures { margin-top: auto; padding-top: 50px; }
   .loginVisual { display: none; }
+
+  .bottomNav {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    position: fixed;
+    inset: auto 0 0 0;
+    z-index: 40;
+    background: color-mix(in oklab, var(--bg-1) 90%, transparent);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .bottomNav a, .bottomNav button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-height: 56px;
+    padding: 8px 4px 7px;
+    border: 0;
+    background: none;
+    cursor: pointer;
+    color: var(--fg-2);
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    -webkit-tap-highlight-color: transparent;
+    transition: color 130ms ease;
+  }
+  .bottomNav svg { width: 22px; height: 22px; transition: transform 130ms ease; }
+  .bottomNav a:active, .bottomNav button:active { color: var(--fg-0); }
+  .bottomNav a.active { color: var(--accent-line); }
+  .bottomNav a.active svg { transform: translateY(-1px); }
+
+  /* Comfortable touch targets on the pages people tap most. */
+  .trackButton { min-height: 42px; }
+  .iconButton { min-height: 38px; }
 }
 
 @media (max-width: 560px) {

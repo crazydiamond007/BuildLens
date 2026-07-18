@@ -25,9 +25,14 @@ pub struct Config {
     pub github_client_id: String,
     pub github_client_secret: String,
     pub github_redirect_uri: String,
+    // The GitHub App itself, as opposed to its OAuth client credentials above.
+    // The numeric App ID and the private key sign the App JWT that mints
+    // installation access tokens; the slug builds the browser install URL.
+    pub github_app_id: String,
+    pub github_app_slug: String,
+    pub github_app_private_key: String,
     pub frontend_url: Url,
     pub github_api_base_url: Url,
-    pub github_webhook_url: Url,
     pub github_webhook_secret: String,
     pub token_encryption_key: [u8; 32],
     pub session_ttl: Duration,
@@ -147,10 +152,6 @@ impl Config {
             github_api_base_url.push('/');
         }
         let github_api_base_url = parse_url("GITHUB_API_BASE_URL", &github_api_base_url)?;
-        let github_webhook_url = parse_url(
-            "GITHUB_WEBHOOK_URL",
-            required("GITHUB_WEBHOOK_URL")?.as_str(),
-        )?;
         let github_webhook_secret = required("GITHUB_WEBHOOK_SECRET")?;
         if github_webhook_secret.len() < 32 {
             return Err(ConfigError::Invalid {
@@ -177,9 +178,11 @@ impl Config {
             github_client_id: required("GITHUB_CLIENT_ID")?,
             github_client_secret: required("GITHUB_CLIENT_SECRET")?,
             github_redirect_uri,
+            github_app_id: required("GITHUB_APP_ID")?,
+            github_app_slug: required("GITHUB_APP_SLUG")?,
+            github_app_private_key: app_private_key()?,
             frontend_url,
             github_api_base_url,
-            github_webhook_url,
             github_webhook_secret,
             token_encryption_key: encryption_key()?,
             session_ttl: Duration::from_secs(session_ttl_seconds),
@@ -217,6 +220,9 @@ impl Config {
             ("GITHUB_CLIENT_ID", &self.github_client_id),
             ("GITHUB_CLIENT_SECRET", &self.github_client_secret),
             ("GITHUB_WEBHOOK_SECRET", &self.github_webhook_secret),
+            ("GITHUB_APP_ID", &self.github_app_id),
+            ("GITHUB_APP_SLUG", &self.github_app_slug),
+            ("GITHUB_APP_PRIVATE_KEY", &self.github_app_private_key),
         ] {
             // The webhook placeholder is 40 characters, so it satisfies the
             // length rule above and is otherwise indistinguishable from a real
@@ -300,6 +306,48 @@ fn encryption_key() -> Result<[u8; 32], ConfigError> {
         })
 }
 
+/// The GitHub App private key, accepted as either a raw PEM (newlines and all)
+/// or a base64 blob of that PEM squeezed onto one line. The single-line form
+/// exists because a multi-line secret is awkward in a `.env` file and outright
+/// hostile in a Kubernetes Secret; either way the gateway hands a real PEM to
+/// the JWT signer. The placeholder is left untouched so `weaknesses()` can still
+/// recognise and report it rather than failing here on a base64 decode.
+fn app_private_key() -> Result<String, ConfigError> {
+    let raw = required("GITHUB_APP_PRIVATE_KEY")?;
+    // Left as-is for weaknesses() to recognise and report; a placeholder is not
+    // a key to validate.
+    if raw.starts_with(PLACEHOLDER_PREFIX) {
+        return Ok(raw);
+    }
+    let pem = if raw.contains("BEGIN") {
+        raw
+    } else {
+        let decoded = STANDARD
+            .decode(raw.trim())
+            .map_err(|e| ConfigError::Invalid {
+                key: "GITHUB_APP_PRIVATE_KEY",
+                message: format!("is neither a PEM nor valid base64: {e}"),
+            })?;
+        String::from_utf8(decoded).map_err(|e| ConfigError::Invalid {
+            key: "GITHUB_APP_PRIVATE_KEY",
+            message: format!("base64 did not decode to text: {e}"),
+        })?
+    };
+    // A real key is validated here so a mangled PEM fails at boot rather than on
+    // the first installation-token mint, which happens deep inside a webhook.
+    validate_rsa_pem(&pem)?;
+    Ok(pem)
+}
+
+fn validate_rsa_pem(pem: &str) -> Result<(), ConfigError> {
+    jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes())
+        .map(|_| ())
+        .map_err(|e| ConfigError::Invalid {
+            key: "GITHUB_APP_PRIVATE_KEY",
+            message: format!("is not a valid RSA private key PEM: {e}"),
+        })
+}
+
 fn required(key: &'static str) -> Result<String, ConfigError> {
     optional(key).ok_or(ConfigError::Missing(key))
 }
@@ -366,9 +414,12 @@ mod tests {
             github_client_id: "Iv1.a1b2c3d4e5f6".to_string(),
             github_client_secret: "0123456789abcdef0123456789abcdef01234567".to_string(),
             github_redirect_uri: "https://buildlens.example/auth/github/callback".to_string(),
+            github_app_id: "123456".to_string(),
+            github_app_slug: "buildlens".to_string(),
+            github_app_private_key:
+                "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----".to_string(),
             frontend_url: Url::parse("https://buildlens.example").unwrap(),
             github_api_base_url: Url::parse("https://api.github.com/").unwrap(),
-            github_webhook_url: Url::parse("https://buildlens.example/webhooks/github").unwrap(),
             github_webhook_secret: "d1a0f3c8b7e6549201fedcba9876543210abcdef".to_string(),
             token_encryption_key: [7u8; 32],
             session_ttl: Duration::from_secs(604_800),
@@ -407,6 +458,17 @@ mod tests {
         config.github_webhook_secret = "replace_with_at_least_32_random_characters".to_string();
         assert!(config.github_webhook_secret.len() >= 32);
         assert_eq!(keys(&config), ["GITHUB_WEBHOOK_SECRET"]);
+    }
+
+    /// The App's private key is a root credential: it mints installation tokens
+    /// for every repository the App can touch. Shipping the `.env.example`
+    /// placeholder to production has to be caught for the same reason the
+    /// webhook secret is.
+    #[test]
+    fn the_github_app_private_key_placeholder_is_rejected() {
+        let mut config = secure_production();
+        config.github_app_private_key = "replace_with_github_app_private_key_pem".to_string();
+        assert_eq!(keys(&config), ["GITHUB_APP_PRIVATE_KEY"]);
     }
 
     #[test]

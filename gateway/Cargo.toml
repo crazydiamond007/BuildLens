@@ -11,6 +11,9 @@ base64 = "0.22.1"
 chrono = { version = "0.4.44", features = ["serde"] }
 dotenvy = "0.15.7"
 getrandom = "0.3.4"
+# RS256 signing for the GitHub App JWT (App auth -> installation tokens). Backed
+# by ring (pure Rust, no OpenSSL); use_pem lets it read the .pem GitHub hands out.
+jsonwebtoken = { version = "9.3.1", default-features = false, features = ["use_pem"] }
 # AMQP client for the outbox relay. lapin is runtime-agnostic, so it needs the
 # two tokio adapter crates to run its I/O on the gateway's existing runtime.
 lapin = { version = "2.5.0", default-features = false, features = ["rustls"] }

@@ -24,6 +24,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health/ready", get(health::ready))
         .route("/auth/github/login", get(auth::github_login))
         .route("/auth/github/callback", get(auth::github_callback))
+        // GitHub redirects here after the user installs the App on their repos.
+        .route("/auth/github/setup", get(auth::github_setup))
         // POST, not GET: a link to a GET logout is a cross-site request any page
         // can make, and SameSite=Lax still sends the session cookie on top-level
         // navigation, so a bare link elsewhere could sign the user out.
@@ -46,7 +48,10 @@ pub fn router(state: AppState) -> Router {
             get(api_tokens::list).post(api_tokens::create),
         )
         .route("/api-tokens/{token_id}", delete(api_tokens::revoke))
-        .route("/github/repositories", get(repositories::discover))
+        .route(
+            "/organizations/{organization_id}/github-repositories",
+            get(repositories::discover),
+        )
         .route(
             "/organizations/{organization_id}/repositories",
             get(repositories::list),
