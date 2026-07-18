@@ -172,7 +172,7 @@ jobs:
       - name: Verify schema version
         run: |
           version="$(docker compose exec -T postgres psql -U buildlens -d buildlens -Atc 'SELECT version FROM schema_migrations')"
-          test "$version" = "12"
+          test "$version" = "13"
 
       - name: Stop migration services
         if: always()
