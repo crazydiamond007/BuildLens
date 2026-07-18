@@ -13,10 +13,11 @@ type Availability =
   | { kind: "trackable" }
   | { kind: "blocked"; reason: string };
 
-// GitHub admin is required because tracking installs a webhook, and a repository
-// belongs to exactly one workspace. Both are gateway rules; deciding them here
-// too is duplication, but it is the difference between a disabled row that
-// explains itself and a button that fails only after being pressed.
+// A repository belongs to exactly one workspace - a gateway rule, decided here
+// too so a claimed repository shows a disabled row that explains itself rather
+// than a button that fails only after being pressed. Everything discovery
+// returns is inside the workspace's installation, so access itself is no longer
+// a per-repository question.
 function availability(
   repository: DiscoveredRepository,
   organizationId: string,
@@ -28,10 +29,31 @@ function availability(
   if (tracking?.tracking_enabled) {
     return { kind: "tracked", repositoryId: tracking.repository_id };
   }
-  if (repository.permissions && !repository.permissions.admin) {
-    return { kind: "blocked", reason: "Needs GitHub admin to install a webhook" };
-  }
   return { kind: "trackable" };
+}
+
+// Before the App is installed there is nothing to list: send the admin to GitHub
+// to install it and pick repositories. This is the middle step of the
+// sign-in -> install -> track flow. Kept hook-free and separate so the tracking
+// list's own hooks always run in the same order.
+export function InstallPanel({ installUrl }: { installUrl: string }) {
+  return (
+    <div className="installPanel">
+      <h3>Install BuildLens on GitHub</h3>
+      <p>
+        BuildLens reads workflow runs and logs through a GitHub App you install on
+        the repositories you choose. Nothing is tracked until you install it and
+        pick which repositories it can see.
+      </p>
+      <a className="primaryButton" href={installUrl}>
+        Install on GitHub
+      </a>
+      <p className="installNote">
+        You&apos;ll pick repositories on GitHub, then land back here to start
+        tracking them.
+      </p>
+    </div>
+  );
 }
 
 export function RepositoryTracking({
@@ -41,6 +63,7 @@ export function RepositoryTracking({
   organizationId: string;
   repositories: DiscoveredRepository[];
 }) {
+
   const [query, setQuery] = useState("");
   const [onlyTrackable, setOnlyTrackable] = useState(false);
   const [pendingId, setPendingId] = useState<number | null>(null);
@@ -120,7 +143,7 @@ export function RepositoryTracking({
       {!rows.length ? (
         <EmptyState
           title="No repositories match"
-          body="Nothing here matches the current filter. Clear it to see every repository your GitHub account can reach."
+          body="Nothing here matches the current filter. Clear it to see every repository the BuildLens app can reach, or add more repositories to the app on GitHub."
         />
       ) : (
         <div className="trackList">

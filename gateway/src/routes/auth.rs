@@ -13,7 +13,7 @@ use crate::{
     crypto::random_urlsafe,
     error::AppError,
     github::{self, GitHubUser, OAuthToken},
-    sessions,
+    github_app, installations, sessions,
     state::AppState,
 };
 
@@ -70,6 +70,67 @@ pub async fn github_callback(
         HeaderValue::from_str(&cookie).map_err(AppError::internal)?,
     );
     Ok((headers, Redirect::to(state.config.frontend_url.as_str())).into_response())
+}
+
+/// Where GitHub sends the browser after the user installs (or reconfigures) the
+/// App - the App's "Setup URL". It carries an `installation_id`, which this links
+/// to the signed-in user's workspace so discovery can start listing the granted
+/// repositories.
+///
+/// Like the OAuth callback, failures redirect to the sign-in page rather than
+/// rendering JSON on an origin with no way back into the app. Signing in is
+/// required: linking an installation to a workspace means knowing whose.
+pub async fn github_setup(
+    State(state): State<AppState>,
+    context: AuditContext,
+    headers: HeaderMap,
+    Query(query): Query<SetupQuery>,
+) -> Result<Response, AppError> {
+    let Some(user_id) = current_user(&state, &headers).await? else {
+        return Ok(sign_in_redirect(&state, SignInError::InvalidRequest));
+    };
+    // An uninstall never lands here - it arrives as a webhook - so a setup hit
+    // with no installation is a stray request, not an error to shout about.
+    let Some(installation_id) = query.installation_id else {
+        return Ok(Redirect::to(state.config.frontend_url.as_str()).into_response());
+    };
+
+    let installation = github_app::fetch_installation(&state, installation_id).await?;
+    installations::upsert(&state.db, &installation).await?;
+    let organization_id =
+        installations::link_to_personal_organization(&state.db, user_id, installation_id).await?;
+
+    let mut transaction = state.db.begin().await?;
+    audit::write_actor(
+        &mut transaction,
+        "user",
+        Some(user_id),
+        None,
+        &context,
+        Some(organization_id),
+        "installation.linked",
+        Some("github_installation"),
+        None,
+        json!({
+            "installation_id": installation_id,
+            "account_login": installation.account_login,
+            "repository_selection": installation.repository_selection,
+        }),
+    )
+    .await?;
+    transaction.commit().await?;
+
+    Ok(Redirect::to(state.config.frontend_url.as_str()).into_response())
+}
+
+/// Resolves the signed-in user from the session cookie, if any. Unlike the
+/// `Principal` extractor, a missing session is `Ok(None)` rather than a 401, so
+/// the setup callback can redirect instead of erroring on a browser origin.
+async fn current_user(state: &AppState, headers: &HeaderMap) -> Result<Option<Uuid>, AppError> {
+    match sessions::from_headers(headers) {
+        Some(token) => sessions::resolve(state, token).await,
+        None => Ok(None),
+    }
 }
 
 /// Idempotent, and deliberately so. A caller whose session already expired, or
@@ -355,6 +416,15 @@ pub struct CallbackQuery {
     state: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SetupQuery {
+    installation_id: Option<i64>,
+    // GitHub also sends `setup_action` (install|update); the linking is the same
+    // for both, so it is accepted but unused.
+    #[allow(dead_code)]
+    setup_action: Option<String>,
 }
 
 #[derive(Serialize)]

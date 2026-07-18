@@ -25,6 +25,64 @@ const navItems = [
 
 const workspaceItems = [["Repository tracking", "settings", "S"]] as const;
 
+// The mobile bottom bar carries the four most-visited destinations; everything
+// else (Repositories, AI inbox, Repository tracking) lives behind "More", which
+// reuses the same slide-in drawer the desktop sidebar becomes on narrow screens.
+const bottomTabs = [
+  ["Overview", "overview", "grid"],
+  ["Runs", "runs", "activity"],
+  ["DORA", "dora", "gauge"],
+  ["Flaky", "flaky-tests", "alert"],
+] as const;
+
+const TAB_ICONS: Record<string, React.ReactNode> = {
+  grid: (
+    <>
+      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+      <rect x="14" y="14" width="7" height="7" rx="1.5" />
+    </>
+  ),
+  activity: <polyline points="3 12 7 12 10 4 14 20 17 12 21 12" />,
+  gauge: (
+    <>
+      <path d="M4 18a8 8 0 0 1 16 0" />
+      <line x1="12" y1="18" x2="15.5" y2="12.5" />
+    </>
+  ),
+  alert: (
+    <>
+      <path d="M12 3 2.5 20h19L12 3Z" />
+      <line x1="12" y1="10" x2="12" y2="14" />
+      <line x1="12" y1="16.7" x2="12" y2="16.8" />
+    </>
+  ),
+  more: (
+    <>
+      <circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none" />
+    </>
+  ),
+};
+
+function TabIcon({ name }: { name: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {TAB_ICONS[name]}
+    </svg>
+  );
+}
+
 export function AppShell({ membership, memberships, user, children }: Props) {
   const pathname = usePathname();
   const router = useRouter();
@@ -144,6 +202,23 @@ export function AppShell({ membership, memberships, user, children }: Props) {
         </header>
         <main className="mainContent">{children}</main>
       </div>
+
+      <nav className="bottomNav" aria-label="Primary navigation">
+        {bottomTabs.map(([label, segment, icon]) => {
+          const href = `${base}/${segment}`;
+          const active = pathname === href || pathname.startsWith(`${href}/`);
+          return (
+            <Link key={segment} href={href} className={active ? "active" : ""}>
+              <TabIcon name={icon} />
+              <span>{label}</span>
+            </Link>
+          );
+        })}
+        <button type="button" onClick={() => setSidebarOpen(true)} aria-label="More navigation">
+          <TabIcon name="more" />
+          <span>More</span>
+        </button>
+      </nav>
 
       {paletteOpen && (
         <div className="commandOverlay" role="presentation" onMouseDown={() => setPaletteOpen(false)}>

@@ -28,31 +28,29 @@ export default async function Home({
   return me ? <LoginState signedIn email={me.email} notice={notice} /> : <LoginState notice={notice} />;
 }
 
-// The consent screen GitHub shows next is the first hard question BuildLens
-// asks, and `repo` is a broad answer to it. Someone deciding whether to grant it
-// deserves the reasoning before the redirect, not after: the scopes are listed
-// here in the same order and wording GitHub will use, including the part that is
-// awkward to admit. Kept in sync with OAUTH_SCOPES in gateway/src/github.rs.
+// BuildLens connects to GitHub in two steps, and it says so before the redirect
+// rather than after. Signing in reads only an identity; the repository access is
+// a separate GitHub App install, scoped to the repositories the person picks.
+// Kept in sync with the App's user-authorization request (no scopes) in
+// gateway/src/github.rs and its installation permissions documented in the README.
 function ScopeDisclosure() {
   return (
     <div className="scopeDisclosure">
-      <p className="scopeIntro">BuildLens will ask GitHub for:</p>
+      <p className="scopeIntro">BuildLens connects to GitHub in two steps:</p>
       <ul className="scopeList">
         <li>
+          <div className="scopeStep">1 &middot; Sign in</div>
           <div className="scopeKeys"><code>read:user</code><code>user:email</code></div>
-          <span>Your name, avatar, and verified email address. This becomes your BuildLens account and your personal workspace.</span>
+          <span>Your name, avatar, and verified email address. This becomes your BuildLens account and your personal workspace. Nothing else is read when you sign in.</span>
         </li>
         <li>
-          <div className="scopeKeys"><code>repo</code></div>
-          <span>Read workflow runs, jobs, and logs, and register a webhook on the repositories you choose to track. This scope is broader than BuildLens needs: GitHub does not offer a narrower OAuth scope that can install a webhook or read Actions logs on a private repository.</span>
-        </li>
-        <li>
-          <div className="scopeKeys"><code>read:org</code></div>
-          <span>Which organizations you belong to, so shared workspaces can find you.</span>
+          <div className="scopeStep">2 &middot; Install the app</div>
+          <div className="scopeKeys"><code>actions:read</code><code>contents:read</code><code>metadata:read</code></div>
+          <span>On only the repositories you choose, BuildLens reads workflow runs, jobs, and logs, plus commit metadata, and receives their build events through a GitHub App. You pick the repositories on GitHub and can change them at any time.</span>
         </li>
       </ul>
       <p className="scopeNote">
-        BuildLens never pushes code, opens pull requests, or changes your workflows. Your access token is encrypted before storage and never reaches the browser. No repository is tracked until you pick one.
+        BuildLens never pushes code, opens pull requests, or changes your workflows. Access is limited to the repositories you install the app on &mdash; not your whole account &mdash; and tokens are encrypted before storage and never reach the browser.
       </p>
     </div>
   );

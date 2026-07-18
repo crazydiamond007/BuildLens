@@ -6,6 +6,8 @@ mod error;
 mod events;
 mod github;
 mod github_api;
+mod github_app;
+mod installations;
 mod junit;
 mod logs;
 mod relay;

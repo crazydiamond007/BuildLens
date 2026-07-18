@@ -24,23 +24,42 @@ use crate::{
 pub async fn discover(
     State(state): State<AppState>,
     principal: Principal,
-) -> Result<Json<Vec<DiscoveredRepository>>, AppError> {
-    // Discovery exposes repositories that are not yet inside any BuildLens
-    // organization, so an organization-scoped API token cannot authorize it.
-    // Keep this on the user's revocable browser session.
+    Path(organization_id): Path<Uuid>,
+) -> Result<Json<DiscoverResponse>, AppError> {
+    // Discovery lists what the workspace's GitHub App installation can see, so
+    // it is scoped to an organization the caller belongs to. Keep it on the
+    // revocable browser session rather than an API token.
     principal.require_session()?;
-    let token = github_api::access_token(&state, principal.user_id).await?;
-    let github_repositories = GitHubApi::new(&state, &token).repositories().await?;
-    let tracked = sqlx::query(
-        "SELECT r.id, r.github_repo_id, r.organization_id, r.tracking_enabled
-         FROM repositories r
-         JOIN organization_members m ON m.organization_id = r.organization_id
-         JOIN organizations o ON o.id = r.organization_id
-         WHERE m.user_id = $1 AND r.deleted_at IS NULL AND o.deleted_at IS NULL
-           AND ($2::uuid IS NULL OR r.organization_id = $2)",
+    require_organization_role(
+        &state,
+        &principal,
+        organization_id,
+        OrganizationRole::Viewer,
     )
-    .bind(principal.user_id)
-    .bind(principal.token_organization_id)
+    .await?;
+
+    let install_url = install_url(&state);
+    // No installation yet: return the install affordance instead of an empty
+    // list the user cannot act on. This is the whole sign-in -> install -> track
+    // flow's middle step.
+    let Some(token) = github_api::organization_installation_token(&state, organization_id).await?
+    else {
+        return Ok(Json(DiscoverResponse {
+            installed: false,
+            install_url,
+            repositories: Vec::new(),
+        }));
+    };
+
+    let github_repositories = GitHubApi::new(&state, &token)
+        .installation_repositories()
+        .await?;
+    let tracked = sqlx::query(
+        "SELECT id, github_repo_id, organization_id, tracking_enabled
+         FROM repositories
+         WHERE organization_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(organization_id)
     .fetch_all(&state.db)
     .await?
     .into_iter()
@@ -56,8 +75,10 @@ pub async fn discover(
     })
     .collect::<Result<HashMap<_, _>, sqlx::Error>>()?;
 
-    Ok(Json(
-        github_repositories
+    Ok(Json(DiscoverResponse {
+        installed: true,
+        install_url,
+        repositories: github_repositories
             .into_iter()
             .map(|repository| {
                 let tracking = tracked.get(&repository.id).cloned();
@@ -67,7 +88,16 @@ pub async fn discover(
                 }
             })
             .collect(),
-    ))
+    }))
+}
+
+/// The browser URL that starts installing (or reconfiguring) the App. Points at
+/// github.com regardless of the API base, because that is where a person clicks.
+fn install_url(state: &AppState) -> String {
+    format!(
+        "https://github.com/apps/{}/installations/new",
+        state.config.github_app_slug
+    )
 }
 
 pub async fn list(
@@ -109,18 +139,22 @@ pub async fn enable_tracking(
     principal.require_session()?;
     require_organization_role(&state, &principal, organization_id, OrganizationRole::Admin).await?;
 
-    let token = github_api::access_token(&state, principal.user_id).await?;
-    let api = GitHubApi::new(&state, &token);
-    let repository = api.repository(github_repository_id).await?;
-    if repository
-        .permissions
-        .as_ref()
-        .is_some_and(|permissions| !permissions.admin)
-    {
+    // Repository access rides on the workspace's App installation now, not on the
+    // caller's own GitHub permissions. No installation means nothing to track.
+    let Some(token) = github_api::organization_installation_token(&state, organization_id).await?
+    else {
         return Err(AppError::bad_request(
-            "GitHub repository admin permission is required to register its webhook",
+            "install the BuildLens GitHub App on this workspace before tracking repositories",
         ));
-    }
+    };
+    let api = GitHubApi::new(&state, &token);
+    // The installation token can only read repositories the App was granted, so a
+    // repository it cannot fetch is one the user has not added to the App.
+    let repository = api.repository(github_repository_id).await.map_err(|_| {
+        AppError::bad_request(
+            "this repository is not part of your BuildLens installation; add it to the app on GitHub first",
+        )
+    })?;
 
     let existing_organization = sqlx::query_scalar::<_, Uuid>(
         "SELECT organization_id FROM repositories
@@ -135,13 +169,9 @@ pub async fn enable_tracking(
         ));
     }
 
-    // GitHub is called before tracking is enabled. A failed hook registration
-    // therefore cannot leave a repository claiming to be current when it has
-    // no way to receive updates. Repeating this operation is safe because
-    // ensure_webhook first looks for the configured callback URL.
-    api.ensure_webhook(&repository.owner.login, &repository.name)
-        .await?;
-
+    // No webhook to register: the App receives events for every installed
+    // repository at its single App-level webhook. Enabling tracking is now purely
+    // a BuildLens-side decision about which of those repositories to store.
     let mut transaction = state.db.begin().await?;
     let row = sqlx::query(
         "INSERT INTO repositories
@@ -217,7 +247,6 @@ pub async fn enable_tracking(
         StatusCode::ACCEPTED,
         Json(TrackingResponse {
             repository: response,
-            webhook_registered: true,
             sync_status: "queued",
         }),
     ))
@@ -242,11 +271,10 @@ pub async fn disable_tracking(
     .ok_or(AppError::NotFound)?;
     let owner: String = row.try_get("owner_login")?;
     let name: String = row.try_get("name")?;
-    let token = github_api::access_token(&state, principal.user_id).await?;
-    GitHubApi::new(&state, &token)
-        .remove_webhook(&owner, &name)
-        .await?;
-
+    // Nothing to remove on GitHub: the App keeps its installation-level webhook
+    // and simply keeps sending events, which the receiver now ignores for an
+    // untracked repository. Fully cutting access is done by editing the app's
+    // repositories (or uninstalling it) on GitHub.
     let mut transaction = state.db.begin().await?;
     let changed = sqlx::query(
         "UPDATE repositories SET tracking_enabled = false
@@ -310,6 +338,15 @@ pub struct DiscoveredRepository {
     tracking: Option<TrackingSummary>,
 }
 
+/// Discovery's answer. When `installed` is false the repository list is empty and
+/// `install_url` is where the browser goes to install the App.
+#[derive(Serialize)]
+pub struct DiscoverResponse {
+    installed: bool,
+    install_url: String,
+    repositories: Vec<DiscoveredRepository>,
+}
+
 #[derive(Serialize)]
 pub struct RepositoryResponse {
     id: Uuid,
@@ -334,6 +371,5 @@ pub struct RepositoryResponse {
 #[derive(Serialize)]
 pub struct TrackingResponse {
     repository: RepositoryResponse,
-    webhook_registered: bool,
     sync_status: &'static str,
 }

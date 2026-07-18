@@ -50,6 +50,15 @@ export type DiscoveredRepository = {
   tracking: TrackingSummary | null;
 };
 
+// Discovery's answer. When `installed` is false the workspace has not installed
+// the GitHub App yet, so `repositories` is empty and `install_url` is where the
+// browser goes to install it and pick repositories.
+export type DiscoverResponse = {
+  installed: boolean;
+  install_url: string;
+  repositories: DiscoveredRepository[];
+};
+
 export type DoraMetric = {
   id: string;
   repository_id: string | null;

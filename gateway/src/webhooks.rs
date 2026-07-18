@@ -23,6 +23,7 @@ use crate::{
     github_api::{
         self, GitHubApi, GitHubJob, GitHubPullRequest, GitHubWorkflow, GitHubWorkflowRun,
     },
+    github_app, installations,
     junit::{self, JunitCapture},
     repository_sync::upsert_pull_request,
     state::AppState,
@@ -199,6 +200,17 @@ async fn claim_delivery(state: &AppState) -> Result<Option<Delivery>, AppError> 
 }
 
 async fn apply_delivery(state: &AppState, delivery: &Delivery) -> Result<(), AppError> {
+    // Installation lifecycle events carry no single repository - they reshape
+    // which installations and repositories the App can reach - so they are
+    // handled before the repository-context gate every other event depends on.
+    match delivery.event_type.as_str() {
+        "installation" => return apply_installation(state, delivery).await,
+        "installation_repositories" => {
+            return apply_installation_repositories(state, delivery).await;
+        }
+        _ => {}
+    }
+
     let context = match delivery.github_repo_id {
         Some(github_repo_id) => fetch_repo_context(state, github_repo_id).await?,
         None => None,
@@ -278,6 +290,103 @@ async fn apply_delivery(state: &AppState, delivery: &Delivery) -> Result<(), App
             }
         });
     }
+    Ok(())
+}
+
+/// Reacts to an `installation` webhook: the App being installed, uninstalled, or
+/// suspended on an account. Keeps `github_installations` in step with GitHub so
+/// discovery and token minting see the current reality.
+async fn apply_installation(state: &AppState, delivery: &Delivery) -> Result<(), AppError> {
+    let action = delivery
+        .payload
+        .pointer("/action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(installation_id) = delivery
+        .payload
+        .pointer("/installation/id")
+        .and_then(Value::as_i64)
+    else {
+        return mark_delivery(state, delivery, "ignored", Some("no installation id")).await;
+    };
+
+    match action {
+        "deleted" => installations::remove(&state.db, installation_id).await?,
+        "suspend" => installations::set_suspended(&state.db, installation_id, true).await?,
+        "unsuspend" => installations::set_suspended(&state.db, installation_id, false).await?,
+        // created, new_permissions_accepted, and the like: the payload already
+        // carries the full installation object, so record it as-is without a
+        // round-trip back to GitHub.
+        _ => {
+            if let Some(installation) = parse_installation(&delivery.payload) {
+                installations::upsert(&state.db, &installation).await?;
+            }
+        }
+    }
+    mark_delivery(state, delivery, "processed", None).await
+}
+
+/// Reacts to `installation_repositories`: repositories added to or removed from
+/// an existing installation. Additions need nothing here - discovery lists live
+/// from GitHub - but removals stop tracking repos the App can no longer reach.
+async fn apply_installation_repositories(
+    state: &AppState,
+    delivery: &Delivery,
+) -> Result<(), AppError> {
+    let removed: Vec<i64> = delivery
+        .payload
+        .pointer("/repositories_removed")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|repo| repo.get("id").and_then(Value::as_i64))
+                .collect()
+        })
+        .unwrap_or_default();
+    installations::untrack_repositories(&state.db, &removed).await?;
+    mark_delivery(state, delivery, "processed", None).await
+}
+
+fn parse_installation(payload: &Value) -> Option<github_app::Installation> {
+    Some(github_app::Installation {
+        installation_id: payload.pointer("/installation/id")?.as_i64()?,
+        account_login: payload
+            .pointer("/installation/account/login")?
+            .as_str()?
+            .to_owned(),
+        account_id: payload.pointer("/installation/account/id")?.as_i64()?,
+        target_type: payload
+            .pointer("/installation/target_type")
+            .and_then(Value::as_str)
+            .unwrap_or("User")
+            .to_owned(),
+        repository_selection: payload
+            .pointer("/installation/repository_selection")
+            .and_then(Value::as_str)
+            .unwrap_or("selected")
+            .to_owned(),
+        suspended: payload
+            .pointer("/installation/suspended_at")
+            .is_some_and(|value| !value.is_null()),
+    })
+}
+
+async fn mark_delivery(
+    state: &AppState,
+    delivery: &Delivery,
+    status: &str,
+    error: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE webhook_deliveries SET status = $2, processed_at = now(), error = $3
+         WHERE id = $1",
+    )
+    .bind(delivery.id)
+    .bind(status)
+    .bind(error)
+    .execute(&state.db)
+    .await?;
     Ok(())
 }
 

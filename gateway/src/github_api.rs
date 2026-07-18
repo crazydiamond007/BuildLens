@@ -3,70 +3,68 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use reqwest::{StatusCode, Url, header};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{error::AppError, state::AppState};
+use crate::{error::AppError, github_app, state::AppState};
 
 const API_VERSION: &str = "2022-11-28";
 const MAX_ARTIFACT_DOWNLOAD_BYTES: usize = 50 * 1024 * 1024;
 
-pub async fn access_token(state: &AppState, user_id: Uuid) -> Result<String, AppError> {
-    let encrypted = sqlx::query(
-        "SELECT access_token_encrypted, token_expires_at
-         FROM github_accounts WHERE user_id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::bad_request("the user has no connected GitHub account"))?;
-
-    let expires_at: Option<DateTime<Utc>> = encrypted.try_get("token_expires_at")?;
-    if expires_at.is_some_and(|expires_at| expires_at <= Utc::now()) {
-        return Err(AppError::bad_request(
-            "the connected GitHub credential has expired; sign in with GitHub again",
-        ));
-    }
-    let ciphertext: Vec<u8> = encrypted.try_get("access_token_encrypted")?;
-    state
-        .token_cipher
-        .decrypt(&ciphertext)
-        .map_err(AppError::from)
-}
-
-/// Finds a usable GitHub token to act on a repository outside a user request -
-/// specifically, the webhook-triggered log capture, which has no session. Picks
-/// any organization member with a connected, unexpired GitHub account. This is a
-/// deliberate simplification for a portfolio project: a production system would
-/// use a GitHub App installation token scoped to the repository rather than
-/// borrowing a member's credential. Returns `None` when no member has a valid
-/// token, which the caller treats as "skip logs".
+/// A token to act on a repository outside a user request - specifically the
+/// webhook-triggered log capture, which has no session. Resolves the repository
+/// to its workspace's GitHub App installation and mints an installation access
+/// token scoped to exactly that installation's repositories.
+///
+/// This replaced borrowing an organization member's OAuth credential: access no
+/// longer depends on some member happening to have a live token, and it is
+/// scoped to the App's permissions rather than a person's full `repo` grant.
+/// Returns `None` when the workspace has no installation, which the caller
+/// treats as "skip logs".
 pub async fn repository_token(
     state: &AppState,
     repository_id: Uuid,
 ) -> Result<Option<String>, AppError> {
-    let row = sqlx::query(
-        "SELECT ga.access_token_encrypted
-         FROM github_accounts ga
-         JOIN organization_members m ON m.user_id = ga.user_id
-         JOIN repositories r ON r.organization_id = m.organization_id
-         JOIN users u ON u.id = ga.user_id
-         WHERE r.id = $1
-           AND u.is_active AND u.deleted_at IS NULL
-           AND (ga.token_expires_at IS NULL OR ga.token_expires_at > now())
-         ORDER BY CASE m.role
-                    WHEN 'owner' THEN 0 WHEN 'admin' THEN 1
-                    WHEN 'member' THEN 2 ELSE 3 END
-         LIMIT 1",
+    let installation_id = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT o.github_installation_id
+         FROM repositories r
+         JOIN organizations o ON o.id = r.organization_id
+         WHERE r.id = $1 AND r.deleted_at IS NULL AND o.deleted_at IS NULL",
     )
     .bind(repository_id)
     .fetch_optional(&state.db)
-    .await?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let ciphertext: Vec<u8> = row.try_get("access_token_encrypted")?;
-    Ok(Some(state.token_cipher.decrypt(&ciphertext)?))
+    .await?
+    .flatten();
+
+    match installation_id {
+        Some(installation_id) => Ok(Some(
+            github_app::installation_token(state, installation_id).await?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// The installation access token for a workspace, or `None` if it has not
+/// installed the App. This is how user-facing handlers (repository discovery and
+/// tracking) reach the GitHub App without holding a user's broad credential.
+pub async fn organization_installation_token(
+    state: &AppState,
+    organization_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    let installation_id = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT github_installation_id FROM organizations
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(organization_id)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten();
+
+    match installation_id {
+        Some(installation_id) => Ok(Some(
+            github_app::installation_token(state, installation_id).await?,
+        )),
+        None => Ok(None),
+    }
 }
 
 pub struct GitHubApi<'a> {
@@ -93,13 +91,27 @@ impl<'a> GitHubApi<'a> {
         Ok(url)
     }
 
-    pub async fn repositories(&self) -> Result<Vec<GitHubRepository>, AppError> {
-        let mut url = self.endpoint(&["user", "repos"])?;
-        url.query_pairs_mut()
-            .append_pair("affiliation", "owner,collaborator,organization_member")
-            .append_pair("sort", "updated")
-            .append_pair("per_page", "100");
-        self.all_pages(url).await
+    /// Every repository this installation can see. Unlike `/user/repos`, this is
+    /// exactly the set the user granted the App - which is also why it does not
+    /// suffer the OAuth app's "org repos vanish until an admin approves" gap.
+    /// The endpoint wraps its array in a `{ total_count, repositories }` object,
+    /// so it is paged through the envelope form.
+    pub async fn installation_repositories(&self) -> Result<Vec<GitHubRepository>, AppError> {
+        let mut url = self.endpoint(&["installation", "repositories"])?;
+        url.query_pairs_mut().append_pair("per_page", "100");
+        let mut repositories = Vec::new();
+        loop {
+            let page = self
+                .page_envelope::<GitHubRepositoriesPage>(url, None)
+                .await?;
+            if let Some(body) = page.body {
+                repositories.extend(body.repositories);
+            }
+            match page.next {
+                Some(next) => url = next,
+                None => return Ok(repositories),
+            }
+        }
     }
 
     pub async fn repository(&self, repository_id: i64) -> Result<GitHubRepository, AppError> {
@@ -359,103 +371,6 @@ impl<'a> GitHubApi<'a> {
     ) -> Result<GitHubPullRequest, AppError> {
         let url = self.endpoint(&["repos", owner, repository, "pulls", &number.to_string()])?;
         self.get(url).await
-    }
-
-    pub async fn ensure_webhook(&self, owner: &str, repository: &str) -> Result<(), AppError> {
-        let mut hooks_url = self.endpoint(&["repos", owner, repository, "hooks"])?;
-        hooks_url.query_pairs_mut().append_pair("per_page", "100");
-        let hooks = self.all_pages::<GitHubHook>(hooks_url.clone()).await?;
-        let callback = self.state.config.github_webhook_url.as_str();
-        if let Some(hook) = hooks
-            .iter()
-            .find(|hook| hook.config.url.as_deref() == Some(callback))
-        {
-            let url =
-                self.endpoint(&["repos", owner, repository, "hooks", &hook.id.to_string()])?;
-            let response = self
-                .request(self.state.http.patch(url))
-                .json(&UpdateWebhook {
-                    active: true,
-                    events: &[
-                        "push",
-                        "pull_request",
-                        "pull_request_review",
-                        "workflow_run",
-                        "workflow_job",
-                        "deployment_status",
-                    ],
-                    config: CreateWebhookConfig {
-                        url: callback,
-                        content_type: "json",
-                        secret: &self.state.config.github_webhook_secret,
-                        insecure_ssl: "0",
-                    },
-                })
-                .send()
-                .await
-                .map_err(|error| AppError::Upstream(error.to_string()))?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let headers = response.headers().clone();
-                return Err(api_error(status, &headers, response.text().await.ok()));
-            }
-            return Ok(());
-        }
-
-        let response = self
-            .request(self.state.http.post(hooks_url))
-            .json(&CreateWebhook {
-                name: "web",
-                active: true,
-                events: &[
-                    "push",
-                    "pull_request",
-                    "pull_request_review",
-                    "workflow_run",
-                    "workflow_job",
-                    "deployment_status",
-                ],
-                config: CreateWebhookConfig {
-                    url: callback,
-                    content_type: "json",
-                    secret: &self.state.config.github_webhook_secret,
-                    insecure_ssl: "0",
-                },
-            })
-            .send()
-            .await
-            .map_err(|error| AppError::Upstream(error.to_string()))?;
-        if response.status() != StatusCode::CREATED {
-            let status = response.status();
-            let headers = response.headers().clone();
-            return Err(api_error(status, &headers, response.text().await.ok()));
-        }
-        Ok(())
-    }
-
-    pub async fn remove_webhook(&self, owner: &str, repository: &str) -> Result<(), AppError> {
-        let mut hooks_url = self.endpoint(&["repos", owner, repository, "hooks"])?;
-        hooks_url.query_pairs_mut().append_pair("per_page", "100");
-        let hooks = self.all_pages::<GitHubHook>(hooks_url).await?;
-        let callback = self.state.config.github_webhook_url.as_str();
-        for hook in hooks
-            .into_iter()
-            .filter(|hook| hook.config.url.as_deref() == Some(callback))
-        {
-            let url =
-                self.endpoint(&["repos", owner, repository, "hooks", &hook.id.to_string()])?;
-            let response = self
-                .request(self.state.http.delete(url))
-                .send()
-                .await
-                .map_err(|error| AppError::Upstream(error.to_string()))?;
-            if response.status() != StatusCode::NO_CONTENT {
-                let status = response.status();
-                let headers = response.headers().clone();
-                return Err(api_error(status, &headers, response.text().await.ok()));
-            }
-        }
-        Ok(())
     }
 
     async fn get<T>(&self, url: Url) -> Result<T, AppError>
@@ -791,38 +706,11 @@ struct GitHubReview {
     submitted_at: Option<DateTime<Utc>>,
 }
 
+/// The envelope `/installation/repositories` returns: an array wrapped in an
+/// object alongside a `total_count`.
 #[derive(Deserialize)]
-struct GitHubHook {
-    id: i64,
-    config: GitHubHookConfig,
-}
-
-#[derive(Deserialize)]
-struct GitHubHookConfig {
-    url: Option<String>,
-}
-
-#[derive(Serialize)]
-struct CreateWebhook<'a> {
-    name: &'static str,
-    active: bool,
-    events: &'a [&'a str],
-    config: CreateWebhookConfig<'a>,
-}
-
-#[derive(Serialize)]
-struct CreateWebhookConfig<'a> {
-    url: &'a str,
-    content_type: &'static str,
-    secret: &'a str,
-    insecure_ssl: &'static str,
-}
-
-#[derive(Serialize)]
-struct UpdateWebhook<'a> {
-    active: bool,
-    events: &'a [&'a str],
-    config: CreateWebhookConfig<'a>,
+struct GitHubRepositoriesPage {
+    repositories: Vec<GitHubRepository>,
 }
 
 #[derive(Deserialize)]
