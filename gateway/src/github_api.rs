@@ -50,21 +50,47 @@ pub async fn organization_installation_token(
     state: &AppState,
     organization_id: Uuid,
 ) -> Result<Option<String>, AppError> {
-    let installation_id = sqlx::query_scalar::<_, Option<i64>>(
+    match organization_installation_id(state, organization_id).await? {
+        Some(installation_id) => Ok(Some(
+            github_app::installation_token(state, installation_id).await?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Like [`organization_installation_token`] but mints a fresh token, dropping any
+/// cached one first. Discovery uses this: a "selected repositories" installation
+/// scopes each token to the repositories present when it was minted, so a cached
+/// token would keep a just-added repository invisible until it expired.
+pub async fn organization_installation_token_fresh(
+    state: &AppState,
+    organization_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    match organization_installation_id(state, organization_id).await? {
+        Some(installation_id) => {
+            github_app::invalidate_installation_token(state, installation_id).await?;
+            Ok(Some(
+                github_app::installation_token(state, installation_id).await?,
+            ))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The GitHub App installation id linked to a workspace, if it has installed the
+/// App. Shared by the cached and fresh token lookups above.
+async fn organization_installation_id(
+    state: &AppState,
+    organization_id: Uuid,
+) -> Result<Option<i64>, AppError> {
+    Ok(sqlx::query_scalar::<_, Option<i64>>(
         "SELECT github_installation_id FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(organization_id)
     .fetch_optional(&state.db)
     .await?
-    .flatten();
-
-    match installation_id {
-        Some(installation_id) => Ok(Some(
-            github_app::installation_token(state, installation_id).await?,
-        )),
-        None => Ok(None),
-    }
+    .flatten())
 }
 
 /// The signed-in user's own GitHub token, decrypted. Used only to check what the
