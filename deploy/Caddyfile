@@ -1,0 +1,41 @@
+# BuildLens production reverse proxy.
+#
+# One domain, two backends, split by path. This is what lets the gateway and the
+# frontend share a single origin: the session cookie the gateway sets (host-only,
+# Path=/) is then sent by the browser on every request to this domain, including
+# the frontend's Server-Component requests. Automatic HTTPS via Let's Encrypt.
+#
+# DOMAIN and ACME_EMAIL come from the environment (see docker-compose.prod.yml).
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# The only gateway paths the outside world touches directly:
+	#   /auth/*     browser sign-in/logout + GitHub's OAuth callback and setup redirect
+	#   /webhooks/* GitHub's App webhook deliveries
+	#   /health*    liveness/readiness for external uptime monitoring
+	# Every other gateway route (/me, /organizations/*, /dashboard, ...) is called
+	# by the frontend server-side over the internal network and is deliberately NOT
+	# exposed here.
+	@gateway path /auth/* /webhooks/* /health /health/*
+	handle @gateway {
+		reverse_proxy gateway:8080
+	}
+
+	# Everything else — pages, static assets, RSC payloads — is the Next.js app.
+	handle {
+		reverse_proxy frontend:3000
+	}
+
+	header {
+		# Conservative hardening; adjust if you add external embeds.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
