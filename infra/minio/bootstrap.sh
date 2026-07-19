@@ -4,7 +4,9 @@
 
 set -e
 
-until mc alias set local "http://minio:9000" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+# Endpoint defaults to the compose service name; Railway (and any other network
+# where MinIO is not simply "minio") overrides it with MINIO_ENDPOINT.
+until mc alias set local "${MINIO_ENDPOINT:-http://minio:9000}" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
     echo "buildlens: waiting for minio..."
     sleep 1
 done
