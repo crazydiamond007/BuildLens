@@ -143,6 +143,37 @@ async fn fetch_primary_email(state: &AppState, access_token: &str) -> Result<Str
         .ok_or_else(|| AppError::bad_request("GitHub account must have a verified email address"))
 }
 
+/// The ids of the App installations this user can access, per GitHub's
+/// `/user/installations`. This is the authorization boundary for linking an
+/// installation to a workspace: an id absent from this list is one the signed-in
+/// user does not control, so it must not be linked to their workspace. One page
+/// is plenty - it lists installations of this App the user can see, not repos.
+pub async fn user_installation_ids(
+    state: &AppState,
+    access_token: &str,
+) -> Result<Vec<i64>, AppError> {
+    let response = state
+        .http
+        .get("https://api.github.com/user/installations?per_page=100")
+        .bearer_auth(access_token)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|error| AppError::Upstream(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(AppError::Upstream(format!(
+            "user installations endpoint returned {}",
+            response.status()
+        )));
+    }
+    let body = response
+        .json::<UserInstallations>()
+        .await
+        .map_err(|error| AppError::Upstream(error.to_string()))?;
+    Ok(body.installations.into_iter().map(|item| item.id).collect())
+}
+
 pub struct OAuthToken {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -190,4 +221,14 @@ struct EmailResponse {
     email: String,
     primary: bool,
     verified: bool,
+}
+
+#[derive(Deserialize)]
+struct UserInstallations {
+    installations: Vec<UserInstallation>,
+}
+
+#[derive(Deserialize)]
+struct UserInstallation {
+    id: i64,
 }
