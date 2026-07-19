@@ -9,15 +9,16 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
 use sqlx::Row;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::{
     audit::{self, AuditContext},
     auth::{OrganizationRole, Principal, require_organization_role},
     error::AppError,
+    github,
     github_api::{self, GitHubApi, GitHubRepository},
-    repository_sync,
+    github_app, installations, repository_sync,
     state::AppState,
 };
 
@@ -39,17 +40,26 @@ pub async fn discover(
     .await?;
 
     let install_url = install_url(&state);
-    // No installation yet: return the install affordance instead of an empty
-    // list the user cannot act on. This is the whole sign-in -> install -> track
-    // flow's middle step.
-    let Some(token) = github_api::organization_installation_token(&state, organization_id).await?
-    else {
-        return Ok(Json(DiscoverResponse {
-            installed: false,
-            install_url,
-            repositories: Vec::new(),
-        }));
-    };
+    // Prefer the workspace's own linked installation, minting a fresh token so a
+    // repository added since the last mint is not hidden by a stale scope. If
+    // nothing is linked yet, try to self-heal from the caller's own installation
+    // before giving up: a missed post-install setup redirect must not strand a
+    // workspace whose App is in fact already installed. Only then fall back to the
+    // install affordance, which is an action the user can still take.
+    let token =
+        match github_api::organization_installation_token_fresh(&state, organization_id).await? {
+            Some(token) => token,
+            None => match reconcile_installation(&state, &principal, organization_id).await? {
+                Some(token) => token,
+                None => {
+                    return Ok(Json(DiscoverResponse {
+                        installed: false,
+                        install_url,
+                        repositories: Vec::new(),
+                    }));
+                }
+            },
+        };
 
     let github_repositories = GitHubApi::new(&state, &token)
         .installation_repositories()
@@ -100,6 +110,62 @@ fn install_url(state: &AppState) -> String {
     )
 }
 
+/// Recovers a workspace whose GitHub App installation exists on GitHub but was
+/// never linked here - typically because the post-install setup redirect never
+/// reached the gateway (it was down at install time, or the App's setup URL was
+/// unset). Without this, such a workspace is stranded on the install prompt even
+/// though the App is installed, because the only other path to a link is that one
+/// redirect.
+///
+/// The caller's own `/user/installations` is the authorization boundary, exactly
+/// as the setup callback uses it: an installation the user cannot see is never
+/// linked. A single installation is linked to their personal workspace and a
+/// token returned; zero or several are left for the explicit install flow, which
+/// can disambiguate. Idempotent - a no-op once the workspace is already linked.
+async fn reconcile_installation(
+    state: &AppState,
+    principal: &Principal,
+    organization_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    let Some(installation_id) = caller_single_installation(state, principal.user_id).await? else {
+        return Ok(None);
+    };
+    let installation = github_app::fetch_installation(state, installation_id).await?;
+    installations::upsert(&state.db, &installation).await?;
+    installations::link_to_personal_organization(&state.db, principal.user_id, installation_id)
+        .await?;
+    // Only the workspace that actually received the link ends up with a token; a
+    // caller viewing some other workspace still sees the install prompt.
+    github_api::organization_installation_token(state, organization_id).await
+}
+
+/// The single App installation the caller controls, or `None` if we cannot tell.
+///
+/// This is a best-effort input to self-healing, so every "cannot tell" reason
+/// collapses to `None` rather than an error: no connected account, a token GitHub
+/// rejects (e.g. one issued before the App migration, which cannot read
+/// `/user/installations`), or a count other than exactly one. The caller then
+/// falls back to the install prompt instead of failing the whole page - a stale
+/// token must not turn discovery into a 502.
+async fn caller_single_installation(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Option<i64>, AppError> {
+    let Ok(user_token) = github_api::user_access_token(state, user_id).await else {
+        return Ok(None);
+    };
+    match github::user_installation_ids(state, &user_token).await {
+        Ok(ids) => match ids.as_slice() {
+            [installation_id] => Ok(Some(*installation_id)),
+            _ => Ok(None),
+        },
+        Err(error) => {
+            warn!(%user_id, ?error, "could not list the caller's installations; skipping self-heal");
+            Ok(None)
+        }
+    }
+}
+
 pub async fn list(
     State(state): State<AppState>,
     principal: Principal,
@@ -140,8 +206,11 @@ pub async fn enable_tracking(
     require_organization_role(&state, &principal, organization_id, OrganizationRole::Admin).await?;
 
     // Repository access rides on the workspace's App installation now, not on the
-    // caller's own GitHub permissions. No installation means nothing to track.
-    let Some(token) = github_api::organization_installation_token(&state, organization_id).await?
+    // caller's own GitHub permissions. No installation means nothing to track. A
+    // fresh token is minted so a repository added to the App moments ago is not
+    // rejected as "not part of your installation" by a token scoped before it.
+    let Some(token) =
+        github_api::organization_installation_token_fresh(&state, organization_id).await?
     else {
         return Err(AppError::bad_request(
             "install the BuildLens GitHub App on this workspace before tracking repositories",

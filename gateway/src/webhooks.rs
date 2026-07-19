@@ -316,19 +316,23 @@ async fn apply_installation(state: &AppState, delivery: &Delivery) -> Result<(),
         "unsuspend" => installations::set_suspended(&state.db, installation_id, false).await?,
         // created, new_permissions_accepted, and the like: the payload already
         // carries the full installation object, so record it as-is without a
-        // round-trip back to GitHub.
+        // round-trip back to GitHub. Drop any cached token, whose scope predates
+        // the change GitHub just reported.
         _ => {
             if let Some(installation) = parse_installation(&delivery.payload) {
                 installations::upsert(&state.db, &installation).await?;
             }
+            github_app::invalidate_installation_token(state, installation_id).await?;
         }
     }
     mark_delivery(state, delivery, "processed", None).await
 }
 
 /// Reacts to `installation_repositories`: repositories added to or removed from
-/// an existing installation. Additions need nothing here - discovery lists live
-/// from GitHub - but removals stop tracking repos the App can no longer reach.
+/// an existing installation. Removals stop tracking repos the App can no longer
+/// reach. Either way the cached installation token is dropped: it was scoped to
+/// the old repository set, so a just-added repo would be unreadable (and a
+/// just-removed one still readable) until it expired.
 async fn apply_installation_repositories(
     state: &AppState,
     delivery: &Delivery,
@@ -345,6 +349,13 @@ async fn apply_installation_repositories(
         })
         .unwrap_or_default();
     installations::untrack_repositories(&state.db, &removed).await?;
+    if let Some(installation_id) = delivery
+        .payload
+        .pointer("/installation/id")
+        .and_then(Value::as_i64)
+    {
+        github_app::invalidate_installation_token(state, installation_id).await?;
+    }
     mark_delivery(state, delivery, "processed", None).await
 }
 

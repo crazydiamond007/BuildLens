@@ -79,6 +79,25 @@ pub async fn installation_token(
     Ok(minted.token)
 }
 
+/// Drops the cached installation token so the next request mints a fresh one.
+///
+/// A token is scoped to exactly the repositories the installation could reach
+/// when it was minted, so once that selection changes - a repository added on
+/// GitHub, or a discovery refresh that wants the current truth - the cached token
+/// would keep hiding the new repository until it expired. Callers invalidate
+/// first, then mint.
+pub async fn invalidate_installation_token(
+    state: &AppState,
+    installation_id: i64,
+) -> Result<(), AppError> {
+    let mut redis = state.redis.clone();
+    redis::cmd("DEL")
+        .arg(cache_key(installation_id))
+        .query_async::<()>(&mut redis)
+        .await?;
+    Ok(())
+}
+
 /// Reads an installation's metadata with the App JWT: which account it is on,
 /// whether it can see all repositories or only selected ones, and whether it is
 /// suspended. Called from the setup callback (and installation webhooks) to keep
